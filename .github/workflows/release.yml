@@ -25,13 +25,6 @@ jobs:
             cc: gcc-14
             extra_cflags: ""
             extra_ldflags: -lm
-          - os: windows-latest
-            platform: windows
-            binary: bismut.exe
-            archive: zip
-            cc: gcc
-            extra_cflags: -Ilibs/tcc/win
-            extra_ldflags: -Llibs/tcc/win -ltcc -lm -lmsvcrt -lucrt
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -61,27 +54,55 @@ jobs:
           cp -r docs libs modules rt README.md LICENSE.md VERSION "${DIR}/"
           echo "${DIR}" > archive_dir.txt
 
-      - name: Create archive (tar.gz)
-        if: matrix.archive == 'tar.gz'
+      - name: Create archive
         shell: bash
         run: |
           DIR=$(cat archive_dir.txt)
           tar czf "${DIR}.tar.gz" "${DIR}"
 
-      - name: Create archive (zip)
-        if: matrix.archive == 'zip'
-        shell: bash
-        run: |
-          DIR=$(cat archive_dir.txt)
-          7z a "${DIR}.zip" "${DIR}"
-
       - uses: actions/upload-artifact@v4
         with:
           name: bismut-${{ steps.version.outputs.version }}-${{ matrix.platform }}
-          path: bismut-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive }}
+          path: bismut-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz
+
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Read version
+        id: version
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap compiler (Python → C)
+        run: python3 tools/reference-compiler/main.py src/main.mut
+
+      - name: Cross-compile for Windows
+        run: x86_64-w64-mingw32-gcc -O2 -std=c99 -Irt -Ilibs/tcc/win -o bismut.exe out.c -Llibs/tcc/win -ltcc -lm -static
+
+      - name: Prepare archive contents
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DIR="bismut-${VERSION}-windows"
+          mkdir -p "${DIR}"
+          cp bismut.exe "${DIR}/"
+          cp -r docs libs modules rt README.md LICENSE.md VERSION "${DIR}/"
+          zip -r "${DIR}.zip" "${DIR}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bismut-${{ steps.version.outputs.version }}-windows
+          path: bismut-${{ steps.version.outputs.version }}-windows.zip
 
   release:
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

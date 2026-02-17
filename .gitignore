@@ -1,6 +1,11 @@
 # IDE / editor
 .vscode/
 
+# Build artifacts
+out.c
+bismut
+bismut.exe
+
 # Python artifacts
 __pycache__/
 *.py[cod]

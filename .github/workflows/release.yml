@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            binary: bismut
+            archive: tar.gz
+            cc: gcc
+            extra_cflags: -Ilibs/tcc/linux
+            extra_ldflags: -Llibs/tcc/linux -ltcc -ldl -lm
+          - os: macos-latest
+            platform: macos
+            binary: bismut
+            archive: tar.gz
+            cc: gcc-14
+            extra_cflags: ""
+            extra_ldflags: -lm
+          - os: windows-latest
+            platform: windows
+            binary: bismut.exe
+            archive: zip
+            cc: gcc
+            extra_cflags: -Ilibs/tcc/win
+            extra_ldflags: -Llibs/tcc/win -ltcc -lm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap compiler (Python → C)
+        run: python3 tools/reference-compiler/main.py src/main.mut
+
+      - name: Compile native binary
+        run: ${{ matrix.cc }} -O2 -std=c99 -Irt ${{ matrix.extra_cflags }} -o ${{ matrix.binary }} out.c ${{ matrix.extra_ldflags }}
+
+      - name: Prepare archive contents
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DIR="bismut-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "${DIR}"
+          cp ${{ matrix.binary }} "${DIR}/"
+          cp -r docs libs modules rt README.md LICENSE.md VERSION "${DIR}/"
+          echo "${DIR}" > archive_dir.txt
+
+      - name: Create archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          DIR=$(cat archive_dir.txt)
+          tar czf "${DIR}.tar.gz" "${DIR}"
+
+      - name: Create archive (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          DIR=$(cat archive_dir.txt)
+          7z a "${DIR}.zip" "${DIR}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bismut-${{ steps.version.outputs.version }}-${{ matrix.platform }}
+          path: bismut-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" \
+            --title "Bismut ${VERSION}" \
+            --generate-notes \
+            artifacts/**/*

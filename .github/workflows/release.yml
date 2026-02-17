@@ -31,7 +31,7 @@ jobs:
             archive: zip
             cc: gcc
             extra_cflags: -Ilibs/tcc/win
-            extra_ldflags: -Llibs/tcc/win -ltcc -lm
+            extra_ldflags: -Llibs/tcc/win -ltcc -lm -lmsvcrt -lucrt
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

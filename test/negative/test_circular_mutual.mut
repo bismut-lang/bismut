@@ -1,0 +1,19 @@
+# test_circular_mutual.mut — mutual direct cycle: hard error
+class A
+    b: B
+    val: i64
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+class B
+    a: A
+    val: i64
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+a := A(1)
+print(a.val)

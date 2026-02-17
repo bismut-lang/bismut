@@ -1,0 +1,60 @@
+# Test 1: Basic string formatting
+s := format("Hello {}, you are {} years old", "Alice", 30)
+print(s)
+
+# Test 2: Integer formatting
+s2 := format("x={}, y={}", 10, 20)
+print(s2)
+
+# Test 3: Float formatting
+s3 := format("pi is approximately {}", 3.14)
+print(s3)
+
+# Test 4: Bool formatting
+s4 := format("flag={}, other={}", True, False)
+print(s4)
+
+# Test 5: Mixed types
+s5 := format("{} scored {} points ({} avg) - winner: {}", "Bob", 42, 3.14, True)
+print(s5)
+
+# Test 6: No format args (just return the string)
+s6 := format("no placeholders here")
+print(s6)
+
+# Test 7: Escaped braces
+s7 := format("set notation: {{}}")
+print(s7)
+
+# Test 8: Escaped braces mixed with args
+s8 := format("{{{}}} = {}", "key", "value")
+print(s8)
+
+# Test 9: Empty format string
+s9 := format("")
+print(s9)
+
+# Test 10: Format with variables
+name: str = "bismut"
+version: i64 = 1
+s10 := format("{} v{}", name, version)
+print(s10)
+
+# Test 11: Format result used in expression
+greeting := format("Hello {}", "world")
+msg := greeting + "!"
+print(msg)
+
+# Test 12: Multiple format calls
+a := format("a={}", 1)
+b := format("b={}", 2)
+c := format("{} {}", a, b)
+print(c)
+
+# Test 13: Enum value in format
+enum Color
+    RED, GREEN, BLUE
+end
+
+s13 := format("color={}", Color.GREEN)
+print(s13)

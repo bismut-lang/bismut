@@ -1,0 +1,28 @@
+# Test intern.mut — string interning
+import langtools.intern
+
+pool := intern.Interner()
+
+# Intern some strings
+id_a := pool.intern("foo")
+id_b := pool.intern("bar")
+id_c := pool.intern("foo")
+
+# Same string → same ID
+print(id_a == id_c)
+print(id_a)
+print(id_b)
+print(id_c)
+
+# Reverse lookup
+print(pool.get(id_a))
+print(pool.get(id_b))
+
+# Count
+print(pool.count())
+
+# Intern more
+pool.intern("baz")
+print(pool.count())
+
+print("done")

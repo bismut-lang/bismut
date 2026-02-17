@@ -1,0 +1,29 @@
+# Test emit.mut — indentation-aware code emitter
+extern stringbuilder
+import langtools.emit
+
+e := emit.Emitter()
+
+e.writeln("def main():")
+e.indent()
+e.writeln("x = 10")
+e.writeln("if x > 5:")
+e.indent()
+e.writeln("print(x)")
+e.dedent()
+e.writeln("return x")
+e.dedent()
+e.writeln("")
+
+result := e.build()
+print(result)
+
+# Test write (no newline)
+e.clear()
+e.write("a")
+e.write("b")
+e.writeln("c")
+r2 := e.build()
+print(r2)
+
+print("done")

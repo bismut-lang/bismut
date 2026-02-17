@@ -1,0 +1,7 @@
+# Negative: construct interface directly
+
+interface IShape
+    def area(self) -> i64
+end
+
+s: IShape = IShape()

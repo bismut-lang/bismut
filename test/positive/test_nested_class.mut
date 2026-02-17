@@ -1,0 +1,35 @@
+# test_nested_class.mut — test nested class field access
+
+class Address
+    street: str
+    city: str
+
+    def init(self, street: str, city: str)
+        self.street = street
+        self.city = city
+    end
+end
+
+class Person
+    name: str
+    addr: Address
+
+    def init(self, name: str, addr: Address)
+        self.name = name
+        self.addr = addr
+    end
+end
+
+a: Address = Address("123 Main St", "Springfield")
+p: Person = Person("Alice", a)
+
+# nested read
+print(p.name)
+print(p.addr.street)
+print(p.addr.city)
+
+# nested write
+p.addr.street = "456 Oak Ave"
+print(p.addr.street)
+
+print("nested class test passed")

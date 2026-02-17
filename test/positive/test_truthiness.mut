@@ -1,0 +1,158 @@
+# Test truthiness semantics: 0/None = falsy, non-zero/non-null = truthy
+
+extern string
+
+# --- Unary ! on integers ---
+a: i64 = 0
+b: i64 = 42
+c: i64 = -1
+
+if not a
+    print(1)    # 1 — !0 is true
+else
+    print(0)
+end
+
+if not b
+    print(0)
+else
+    print(2)    # 2 — !42 is false
+end
+
+if not c
+    print(0)
+else
+    print(3)    # 3 — !(-1) is false
+end
+
+# --- Unary ! on other int types ---
+x8: i8 = 0
+if not x8
+    print(4)    # 4 — !0i8 is true
+end
+
+x32: i32 = 1
+if not x32
+    print(0)
+else
+    print(5)    # 5 — !1i32 is false
+end
+
+u: u64 = 0
+if not u
+    print(6)    # 6 — !0u64 is true
+end
+
+# --- if/elif with integer condition ---
+n: i64 = 10
+if n
+    print(7)    # 7 — 10 is truthy
+end
+
+z: i64 = 0
+if z
+    print(0)
+else
+    print(8)    # 8 — 0 is falsy
+end
+
+# --- while with integer condition ---
+count: i64 = 3
+while count
+    count -= 1
+end
+print(9)        # 9 — loop exited when count == 0
+
+# --- and and or with integers ---
+p: i64 = 5
+q: i64 = 0
+if p and not q
+    print(10)   # 10 — 5 and !0 == true and true
+end
+
+if q or p
+    print(11)   # 11 — 0 or 5 == false or true
+end
+
+# --- Ref type truthiness (None is falsy) ---
+class Box
+    val: i64
+
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+bx: Box = Box(99)
+if bx
+    print(12)   # 12 — non-null ref is truthy
+end
+
+bx2: Box = None
+if not bx2
+    print(13)   # 13 — None ref is falsy
+end
+
+if bx2
+    print(0)
+else
+    print(14)   # 14 — None in if condition is falsy
+end
+
+# --- String truthiness (str is ref type) ---
+s: str = "hello"
+if s
+    print(15)   # 15 — non-null string is truthy
+end
+
+# --- List truthiness ---
+lst: List[i64] = List[i64]()
+if lst
+    print(16)   # 16 — non-null list is truthy (even if empty)
+end
+
+# --- Mixed and / or with ref types ---
+if bx and not bx2
+    print(17)   # 17 — non-null and not null
+end
+
+if bx2 or bx
+    print(18)   # 18 — null or non-null
+end
+
+# --- Mixed integer and bool ---
+flag: bool = True
+val: i64 = 42
+if flag and val
+    print(19)   # 19 — bool and integer
+end
+
+if val or flag
+    print(20)   # 20 — integer or bool
+end
+
+# --- Enum truthiness (enums are i64) ---
+enum Color
+    RED, GREEN, BLUE
+end
+
+clr: Color = Color.GREEN
+if clr
+    print(21)   # 21 — GREEN == 1, truthy
+end
+
+clr0: Color = Color.RED
+if not clr0
+    print(22)   # 22 — RED == 0, falsy
+end
+
+# --- elif with integer ---
+v: i64 = 0
+w: i64 = 5
+if v
+    print(0)
+elif w
+    print(23)   # 23 — elif with truthy integer
+end
+
+print(0)        # terminator

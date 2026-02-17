@@ -1,0 +1,2 @@
+# Negative: use undefined variable
+print(x)

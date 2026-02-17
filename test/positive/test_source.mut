@@ -1,0 +1,62 @@
+# Test source.mut — multi-file source manager with fast line/col lookup
+import langtools.source
+
+sm := source.SourceManager()
+
+# Register files
+src1 := "first line\nsecond line\nthird line"
+src2 := "alpha\nbeta\ngamma\ndelta"
+fid1 := sm.add_file("main.mut", src1)
+fid2 := sm.add_file("lib.mut", src2)
+
+# file_count
+print(sm.file_count())
+
+# file_name
+print(sm.file_name(fid1))
+print(sm.file_name(fid2))
+
+# line_count
+print(sm.line_count(fid1))
+print(sm.line_count(fid2))
+
+# get_line
+print(sm.get_line(fid1, 1))
+print(sm.get_line(fid1, 2))
+print(sm.get_line(fid1, 3))
+print(sm.get_line(fid2, 4))
+
+# locate — byte offset 0 = line 1 col 1
+loc1 := sm.locate(fid1, 0)
+print(loc1.line)
+print(loc1.col)
+
+# locate — "second" starts at offset 11
+loc2 := sm.locate(fid1, 11)
+print(loc2.line)
+print(loc2.col)
+
+# locate — "third" starts at offset 23
+loc3 := sm.locate(fid1, 23)
+print(loc3.line)
+print(loc3.col)
+
+# locate — middle of "second line" (offset 15 = 's','e','c','o','n' -> col 5)
+loc4 := sm.locate(fid1, 15)
+print(loc4.line)
+print(loc4.col)
+
+# locate in second file — "gamma" at offset 11
+loc5 := sm.locate(fid2, 11)
+print(loc5.line)
+print(loc5.col)
+
+# file_size
+print(sm.file_size(fid1))
+print(sm.file_size(fid2))
+
+# get_line out of bounds
+print(sm.get_line(fid1, 0))
+print(sm.get_line(fid1, 99))
+
+print("done")

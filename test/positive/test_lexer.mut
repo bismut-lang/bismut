@@ -1,0 +1,150 @@
+# Test: Bismut lexer (lexer module)
+# Tokenizes various Bismut source snippets and verifies token kinds/lexemes.
+# EXPECTED:--- test 1: keywords ---\nDEF def\nIDENT add\n( (\nIDENT a\n: :\nIDENT i64\n, ,\nIDENT b\n: :\nIDENT i64\n) )\n-> ->\nIDENT i64\nRETURN return\nIDENT a\n+ +\nIDENT b\nEND end\n--- test 2: all keywords ---\n27\n--- test 3: operators ---\n:= :=\n== ==\n!= !=\n<= <=\n>= >=\n<< <<\n>> >>\nAND and\nOR or\n+= +=\n-= -=\n-> ->\n<<= <<=\n>>= >>=\n--- test 4: numbers ---\nINT 42\nINT 0xFF\nINT 0b1010\nFLOAT 3.14\nFLOAT 1.0e10\n--- test 5: strings ---\nSTRING "hello"\nSTRING 'world'\nSTRING """multi"""\n--- test 6: char literals ---\nCHAR 'A'\nCHAR '\\n'\nCHAR '\\0'\n--- test 7: newline coalescing ---\n6\n--- test 8: comments ---\n3\n--- test 9: single-char ops ---\n( (\n) )\n[ [\n] ]\n= =\n+ +\n- -\n* *\n/ /\n% %\n< <\n> >\n& &\n| |\n^ ^\n~ ~\n. .\n, ,\n: :\n; ;\n--- test 10: real bismut snippet ---\n78\n--- test 11: error recovery ---\nERROR\n--- test 12: empty source ---\n1\nEOF
+
+import lexer as px
+import langtools.lex
+import langtools.sink
+extern string
+
+s := sink.Sink()
+
+# ─── Test 1: function signature keywords & punctuation ────────────────
+print("--- test 1: keywords ---")
+src := "def add(a: i64, b: i64) -> i64\n    return a + b\nend"
+tokens := px.tokenize("<t1>", src, s)
+i: i64 = 0
+while i < len(tokens)
+    tok := tokens[i]
+    if not tok.is_eof() and tok.kind != lex.TokenKind.NEWLINE
+        print(format("{} {}", px.kind_name(tok.kind), tok.lexeme))
+    end
+    i += 1
+end
+
+# ─── Test 2: all keywords recognized ─────────────────────────────────
+print("--- test 2: all keywords ---")
+kw_src := "def if elif else while return break continue end True False None class for in interface import as extern enum const static is struct not and or"
+kw_tokens := px.tokenize("<t2>", kw_src, s)
+kw_count: i64 = 0
+i = 0
+while i < len(kw_tokens)
+    tok := kw_tokens[i]
+    if tok.kind >= 100 and tok.kind < 200
+        kw_count += 1
+    end
+    i += 1
+end
+print(kw_count)
+
+# ─── Test 3: multi-char operators ────────────────────────────────────
+print("--- test 3: operators ---")
+op_src := ":= == != <= >= << >> and or += -= -> <<= >>="
+op_tokens := px.tokenize("<t3>", op_src, s)
+i = 0
+while i < len(op_tokens)
+    tok := op_tokens[i]
+    if tok.kind != lex.TokenKind.NEWLINE and tok.kind != lex.TokenKind.EOF
+        print(format("{} {}", px.kind_name(tok.kind), tok.lexeme))
+    end
+    i += 1
+end
+
+# ─── Test 4: numbers ─────────────────────────────────────────────────
+print("--- test 4: numbers ---")
+num_src := "42 0xFF 0b1010 3.14 1.0e10"
+num_tokens := px.tokenize("<t4>", num_src, s)
+i = 0
+while i < len(num_tokens)
+    tok := num_tokens[i]
+    if tok.kind == lex.TokenKind.INT or tok.kind == lex.TokenKind.FLOAT
+        print(format("{} {}", px.kind_name(tok.kind), tok.lexeme))
+    end
+    i += 1
+end
+
+# ─── Test 5: strings ─────────────────────────────────────────────────
+print("--- test 5: strings ---")
+tq := string.concat(string.concat("\"\"\"", "multi"), "\"\"\"")
+str_src := string.concat("\"hello\" 'world' ", tq)
+str_tokens := px.tokenize("<t5>", str_src, s)
+i = 0
+while i < len(str_tokens)
+    tok := str_tokens[i]
+    if tok.kind == lex.TokenKind.STRING
+        print(format("{} {}", px.kind_name(tok.kind), tok.lexeme))
+    end
+    i += 1
+end
+
+# ─── Test 6: char literals ───────────────────────────────────────────
+print("--- test 6: char literals ---")
+char_src := "'A' '\\n' '\\0'"
+char_tokens := px.tokenize("<t6>", char_src, s)
+i = 0
+while i < len(char_tokens)
+    tok := char_tokens[i]
+    if tok.kind == lex.TokenKind.CHAR
+        print(format("{} {}", px.kind_name(tok.kind), tok.lexeme))
+    end
+    i += 1
+end
+
+# ─── Test 7: newline coalescing ──────────────────────────────────────
+print("--- test 7: newline coalescing ---")
+nl_src := "a\n\n\nb\n\nc"
+nl_tokens := px.tokenize("<t7>", nl_src, s)
+print(len(nl_tokens))
+
+# ─── Test 8: comments are skipped ────────────────────────────────────
+print("--- test 8: comments ---")
+cmt_src := "a # comment\nb // also comment\nc"
+cmt_tokens := px.tokenize("<t8>", cmt_src, s)
+non_ws_count: i64 = 0
+i = 0
+while i < len(cmt_tokens)
+    tok := cmt_tokens[i]
+    if tok.kind != lex.TokenKind.NEWLINE and tok.kind != lex.TokenKind.EOF
+        non_ws_count += 1
+    end
+    i += 1
+end
+print(non_ws_count)
+
+# ─── Test 9: single-char operators and punctuation ───────────────────
+print("--- test 9: single-char ops ---")
+single_src := "( ) [ ] = + - * / % < > & | ^ ~ . , : ;"
+single_tokens := px.tokenize("<t9>", single_src, s)
+i = 0
+while i < len(single_tokens)
+    tok := single_tokens[i]
+    if tok.kind != lex.TokenKind.NEWLINE and tok.kind != lex.TokenKind.EOF
+        print(format("{} {}", px.kind_name(tok.kind), tok.lexeme))
+    end
+    i += 1
+end
+
+# ─── Test 10: real Bismut snippet ─────────────────────────────────────
+print("--- test 10: real bismut snippet ---")
+real_src := "class Point\n    x: i64\n    y: i64\n\n    def init(self, x: i64, y: i64)\n        self.x = x\n        self.y = y\n    end\n\n    def sum(self) -> i64\n        return self.x + self.y\n    end\nend\n\np := Point(10, 20)\nprint(p.sum())"
+real_tokens := px.tokenize("<t10>", real_src, s)
+print(len(real_tokens))
+
+# ─── Test 11: error token for unexpected character ───────────────────
+print("--- test 11: error recovery ---")
+err_src := "`"
+err_tokens := px.tokenize("<t11>", err_src, s)
+i = 0
+while i < len(err_tokens)
+    tok := err_tokens[i]
+    if tok.kind == lex.TokenKind.ERROR
+        print(px.kind_name(tok.kind))
+    end
+    i += 1
+end
+
+# ─── Test 12: empty source ───────────────────────────────────────────
+print("--- test 12: empty source ---")
+empty_tokens := px.tokenize("<t12>", "", s)
+print(len(empty_tokens))
+print(px.kind_name(empty_tokens[0].kind))

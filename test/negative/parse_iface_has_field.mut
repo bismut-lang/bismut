@@ -1,0 +1,4 @@
+# Negative: non-method inside interface body
+interface IShape
+    x: i64
+end

@@ -1,0 +1,18 @@
+# Runtime panic: downcast None to a class
+
+interface IShape
+    def name(self) -> str
+end
+
+class Circle : IShape
+    r: i64
+    def init(self, r: i64)
+        self.r = r
+    end
+    def name(self) -> str
+        return "Circle"
+    end
+end
+
+s: IShape = None
+c: Circle = s as Circle

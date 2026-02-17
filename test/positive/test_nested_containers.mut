@@ -1,0 +1,144 @@
+# test_nested_containers.mut — comprehensive nested container tests
+
+# ==============================
+# 1. List[List[i64]]
+# ==============================
+matrix: List[List[i64]] = List[List[i64]]()
+row1 := List[i64]()
+append(row1, 1)
+append(row1, 2)
+row2 := List[i64]()
+append(row2, 3)
+append(row2, 4)
+append(matrix, row1)
+append(matrix, row2)
+print(matrix[0][0])   # 1
+print(matrix[1][1])   # 4
+
+# ==============================
+# 2. List[List[str]]
+# ==============================
+names: List[List[str]] = List[List[str]]()
+group1 := List[str]()
+append(group1, "alice")
+append(group1, "bob")
+append(names, group1)
+print(names[0][0])     # alice
+print(names[0][1])     # bob
+
+# ==============================
+# 3. Dict[str, List[i64]]
+# ==============================
+scores: Dict[str, List[i64]] = Dict[str, List[i64]]()
+math_scores := List[i64]()
+append(math_scores, 90)
+append(math_scores, 85)
+scores["math"] = math_scores
+print(scores["math"][0])  # 90
+print(scores["math"][1])  # 85
+
+# ==============================
+# 4. Dict[str, List[str]]
+# ==============================
+tags: Dict[str, List[str]] = Dict[str, List[str]]()
+colors := List[str]()
+append(colors, "red")
+append(colors, "blue")
+tags["colors"] = colors
+print(tags["colors"][0])  # red
+
+# ==============================
+# 5. List[Dict[str, i64]]
+# ==============================
+records: List[Dict[str, i64]] = List[Dict[str, i64]]()
+r1 := Dict[str, i64]()
+r1["x"] = 10
+r1["y"] = 20
+append(records, r1)
+print(records[0]["x"])   # 10
+print(records[0]["y"])   # 20
+
+# ==============================
+# 6. List[Dict[str, str]]
+# ==============================
+people: List[Dict[str, str]] = List[Dict[str, str]]()
+p1 := Dict[str, str]()
+p1["name"] = "Charlie"
+p1["city"] = "NYC"
+append(people, p1)
+print(people[0]["name"])   # Charlie
+print(people[0]["city"])   # NYC
+
+# ==============================
+# 7. Class with List and Dict fields
+# ==============================
+class Team
+    name: str
+    members: List[str]
+    scores: Dict[str, i64]
+
+    def init(self, name: str)
+        self.name = name
+        self.members = List[str]()
+        self.scores = Dict[str, i64]()
+    end
+end
+
+t := Team("Alpha")
+append(t.members, "Dan")
+append(t.members, "Eve")
+t.scores["Dan"] = 100
+t.scores["Eve"] = 95
+print(t.name)            # Alpha
+print(t.members[0])      # Dan
+print(t.scores["Eve"])   # 95
+
+# ==============================
+# 8. Class with nested container fields
+# ==============================
+class Grid
+    data: List[List[i64]]
+    labels: Dict[str, List[str]]
+
+    def init(self)
+        self.data = List[List[i64]]()
+        self.labels = Dict[str, List[str]]()
+    end
+end
+
+g := Grid()
+r := List[i64]()
+append(r, 7)
+append(r, 8)
+append(g.data, r)
+print(g.data[0][0])      # 7
+print(g.data[0][1])      # 8
+
+lab := List[str]()
+append(lab, "row0")
+g.labels["rows"] = lab
+print(g.labels["rows"][0])  # row0
+
+# ==============================
+# 9. List[ClassName] with container fields
+# ==============================
+teams: List[Team] = List[Team]()
+t2 := Team("Beta")
+append(t2.members, "Fay")
+t2.scores["Fay"] = 88
+append(teams, t2)
+print(teams[0].name)          # Beta
+print(teams[0].members[0])    # Fay
+print(teams[0].scores["Fay"]) # 88
+
+# ==============================
+# 10. Dict[str, ClassName] with container fields
+# ==============================
+team_map: Dict[str, Team] = Dict[str, Team]()
+t3 := Team("Gamma")
+append(t3.members, "Gus")
+t3.scores["Gus"] = 77
+team_map["g"] = t3
+print(team_map["g"].name)          # Gamma
+print(team_map["g"].members[0])    # Gus
+print(team_map["g"].scores["Gus"]) # 77

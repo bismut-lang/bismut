@@ -1,0 +1,15 @@
+# stringbuilder — StringBuilder as opaque type
+
+[types]
+StringBuilder = __lang_rt_Sb
+
+[functions]
+new() -> StringBuilder = __clib__stringbuilder_new
+destroy(sb: StringBuilder) [dtor] = __clib__stringbuilder_destroy
+append_str(sb: StringBuilder, s: str) = __clib__stringbuilder_append_str
+append_i64(sb: StringBuilder, n: i64) = __clib__stringbuilder_append_i64
+append_f64(sb: StringBuilder, n: f64) = __clib__stringbuilder_append_f64
+append_bool(sb: StringBuilder, b: bool) = __clib__stringbuilder_append_bool
+build(sb: StringBuilder) -> str = __clib__stringbuilder_build
+clear(sb: StringBuilder) = __clib__stringbuilder_clear
+length(sb: StringBuilder) -> i64 = __clib__stringbuilder_length

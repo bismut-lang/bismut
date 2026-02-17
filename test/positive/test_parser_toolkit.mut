@@ -1,0 +1,415 @@
+# Test: parser toolkit module
+# Verifies the Pratt parser from modules/lexer/pars.mut
+
+import langtools.pars
+
+# ─── Calculator token kinds (extending TK_USER = 100) ────────────────
+
+const TK_NUM: i64 = 2
+const TK_PLUS: i64 = 100
+const TK_MINUS: i64 = 101
+const TK_STAR: i64 = 102
+const TK_SLASH: i64 = 103
+const TK_LPAREN: i64 = 104
+const TK_RPAREN: i64 = 105
+const TK_BANG: i64 = 106
+const TK_CARET: i64 = 107
+
+# ─── Calculator node kinds (extending NK_USER = 100) ─────────────────
+
+const NK_NUM: i64 = 100
+const NK_ADD: i64 = 101
+const NK_SUB: i64 = 102
+const NK_MUL: i64 = 103
+const NK_DIV: i64 = 104
+const NK_NEG: i64 = 105
+const NK_NOT: i64 = 106
+const NK_POW: i64 = 107
+
+# ─── ArithRules: IParseRules for a small calculator ───────────────────
+
+class ArithRules : pars.IParseRules
+    _pad: i64
+
+    def init(self)
+        self._pad = 0
+    end
+
+    def nud(self, p: pars.Parser, tok: pars.Token) -> pars.Node
+        if tok.kind == TK_NUM
+            return pars.leaf(NK_NUM, tok)
+        end
+        if tok.kind == TK_MINUS
+            operand := p.expr(70)
+            return pars.unary(NK_NEG, tok, operand)
+        end
+        if tok.kind == TK_BANG
+            operand := p.expr(70)
+            return pars.unary(NK_NOT, tok, operand)
+        end
+        if tok.kind == TK_LPAREN
+            inner := p.expr(0)
+            if inner.is_error()
+                return inner
+            end
+            close := p.expect(TK_RPAREN)
+            if close.is_error()
+                return pars.error_node(tok, close.lexeme)
+            end
+            return inner
+        end
+        return pars.error_node(tok, format("unexpected token '{}'", tok.lexeme))
+    end
+
+    def led(self, p: pars.Parser, left: pars.Node, tok: pars.Token) -> pars.Node
+        if tok.kind == TK_PLUS
+            right := p.expr(10)
+            return pars.binary(NK_ADD, tok, left, right)
+        end
+        if tok.kind == TK_MINUS
+            right := p.expr(10)
+            return pars.binary(NK_SUB, tok, left, right)
+        end
+        if tok.kind == TK_STAR
+            right := p.expr(20)
+            return pars.binary(NK_MUL, tok, left, right)
+        end
+        if tok.kind == TK_SLASH
+            right := p.expr(20)
+            return pars.binary(NK_DIV, tok, left, right)
+        end
+        if tok.kind == TK_CARET
+            # Right-associative: use bp - 1
+            right := p.expr(29)
+            return pars.binary(NK_POW, tok, left, right)
+        end
+        return pars.error_node(tok, format("unexpected infix '{}'", tok.lexeme))
+    end
+
+    def lbp(self, kind: i64) -> i64
+        if kind == TK_PLUS or kind == TK_MINUS
+            return 10
+        end
+        if kind == TK_STAR or kind == TK_SLASH
+            return 20
+        end
+        if kind == TK_CARET
+            return 30
+        end
+        return 0
+    end
+
+    def has_nud(self, kind: i64) -> bool
+        return kind == TK_NUM or kind == TK_MINUS or kind == TK_BANG or kind == TK_LPAREN
+    end
+
+    def has_led(self, kind: i64) -> bool
+        return kind == TK_PLUS or kind == TK_MINUS or kind == TK_STAR or kind == TK_SLASH or kind == TK_CARET
+    end
+end
+
+# ─── Helper ──────────────────────────────────────────────────────────
+
+def tok(kind: i64, lex: str) -> pars.Token
+    return pars.Token(kind, lex, 1, 1)
+end
+
+def tok_at(kind: i64, lex: str, line: i64, col: i64) -> pars.Token
+    return pars.Token(kind, lex, line, col)
+end
+
+rules := ArithRules()
+
+# ─── Test 1: Simple binary 1 + 2 ────────────────────────────────────
+
+tokens1: List[pars.Token] = List[pars.Token]()
+append(tokens1, tok(TK_NUM, "1"))
+append(tokens1, tok(TK_PLUS, "+"))
+append(tokens1, tok(TK_NUM, "2"))
+
+p1 := pars.Parser("<test>", tokens1, rules)
+n1 := p1.expr(0)
+print(n1.is_error())           # False
+print(n1.value)                # +
+print(n1.child_count())        # 2
+print(n1.child(0).value)       # 1
+print(n1.child(1).value)       # 2
+
+# ─── Test 2: Precedence 1 + 2 * 3 → +(1, *(2, 3)) ──────────────────
+
+tokens2: List[pars.Token] = List[pars.Token]()
+append(tokens2, tok(TK_NUM, "1"))
+append(tokens2, tok(TK_PLUS, "+"))
+append(tokens2, tok(TK_NUM, "2"))
+append(tokens2, tok(TK_STAR, "*"))
+append(tokens2, tok(TK_NUM, "3"))
+
+p2 := pars.Parser("<test>", tokens2, rules)
+n2 := p2.expr(0)
+print(n2.value)                # +
+print(n2.child(0).value)       # 1
+print(n2.child(1).value)       # *
+print(n2.child(1).child(0).value)  # 2
+print(n2.child(1).child(1).value)  # 3
+
+# ─── Test 3: Parentheses (1 + 2) * 3 → *(+(1,2), 3) ────────────────
+
+tokens3: List[pars.Token] = List[pars.Token]()
+append(tokens3, tok(TK_LPAREN, "("))
+append(tokens3, tok(TK_NUM, "1"))
+append(tokens3, tok(TK_PLUS, "+"))
+append(tokens3, tok(TK_NUM, "2"))
+append(tokens3, tok(TK_RPAREN, ")"))
+append(tokens3, tok(TK_STAR, "*"))
+append(tokens3, tok(TK_NUM, "3"))
+
+p3 := pars.Parser("<test>", tokens3, rules)
+n3 := p3.expr(0)
+print(n3.value)                # *
+print(n3.child(0).value)       # +
+print(n3.child(1).value)       # 3
+
+# ─── Test 4: Unary minus -5 ─────────────────────────────────────────
+
+tokens4: List[pars.Token] = List[pars.Token]()
+append(tokens4, tok(TK_MINUS, "-"))
+append(tokens4, tok(TK_NUM, "5"))
+
+p4 := pars.Parser("<test>", tokens4, rules)
+n4 := p4.expr(0)
+print(n4.kind)                 # 105 (NK_NEG)
+print(n4.child_count())        # 1
+print(n4.child(0).value)       # 5
+
+# ─── Test 5: Right-associative 2 ^ 3 ^ 4 → ^(2, ^(3, 4)) ──────────
+
+tokens5: List[pars.Token] = List[pars.Token]()
+append(tokens5, tok(TK_NUM, "2"))
+append(tokens5, tok(TK_CARET, "^"))
+append(tokens5, tok(TK_NUM, "3"))
+append(tokens5, tok(TK_CARET, "^"))
+append(tokens5, tok(TK_NUM, "4"))
+
+p5 := pars.Parser("<test>", tokens5, rules)
+n5 := p5.expr(0)
+print(n5.value)                        # ^
+print(n5.child(0).value)               # 2
+print(n5.child(1).value)               # ^
+print(n5.child(1).child(0).value)      # 3
+print(n5.child(1).child(1).value)      # 4
+
+# ─── Test 6: Error — unexpected token ────────────────────────────────
+
+tokens6: List[pars.Token] = List[pars.Token]()
+append(tokens6, tok(TK_PLUS, "+"))
+
+p6 := pars.Parser("<test>", tokens6, rules)
+n6 := p6.expr(0)
+print(n6.is_error())           # True
+
+# ─── Test 7: Error — empty input ────────────────────────────────────
+
+tokens7: List[pars.Token] = List[pars.Token]()
+
+p7 := pars.Parser("<test>", tokens7, rules)
+n7 := p7.expr(0)
+print(n7.is_error())           # True
+
+# ─── Test 8: dump_tree ──────────────────────────────────────────────
+
+pars.dump_tree(n2, 0)
+# 101:+
+#   100:1
+#   103:*
+#     100:2
+#     100:3
+
+# ─── Test 9: node_to_str ────────────────────────────────────────────
+
+print(pars.node_to_str(n1))    # 101:+[2]
+print(pars.node_to_str(n4))    # 105:-[1]
+
+# ─── Test 10: Parser utilities ───────────────────────────────────────
+
+tokens10: List[pars.Token] = List[pars.Token]()
+append(tokens10, tok(TK_NUM, "42"))
+append(tokens10, tok(TK_PLUS, "+"))
+append(tokens10, tok(TK_NUM, "7"))
+
+p10 := pars.Parser("<test>", tokens10, rules)
+print(p10.at_end())            # False
+print(p10.peek())              # 2 (TK_NUM)
+print(p10.match_kind(TK_NUM))  # True
+print(p10.consume(TK_NUM))     # True
+print(p10.peek())              # 100 (TK_PLUS)
+
+# ─── Test 11: expect success / failure ───────────────────────────────
+
+tokens11: List[pars.Token] = List[pars.Token]()
+append(tokens11, tok(TK_NUM, "10"))
+append(tokens11, tok(TK_PLUS, "+"))
+
+p11 := pars.Parser("<test>", tokens11, rules)
+ok := p11.expect(TK_NUM)
+print(ok.is_error())           # False
+print(ok.lexeme)               # 10
+bad := p11.expect(TK_NUM)
+print(bad.is_error())          # True
+
+# ─── Test 12: save / restore ────────────────────────────────────────
+
+tokens12: List[pars.Token] = List[pars.Token]()
+append(tokens12, tok(TK_NUM, "1"))
+append(tokens12, tok(TK_PLUS, "+"))
+append(tokens12, tok(TK_NUM, "2"))
+
+p12 := pars.Parser("<test>", tokens12, rules)
+saved := p12.save()
+p12.advance()
+p12.advance()
+print(p12.peek())              # 2 (TK_NUM, the "2")
+p12.restore(saved)
+print(p12.peek())              # 2 (TK_NUM, the "1")
+print(p12.current().lexeme)    # 1
+
+# ─── Test 13: parse_list ────────────────────────────────────────────
+
+const TK_COMMA: i64 = 108
+
+tokens13: List[pars.Token] = List[pars.Token]()
+append(tokens13, tok(TK_NUM, "1"))
+append(tokens13, tok(TK_COMMA, ","))
+append(tokens13, tok(TK_NUM, "2"))
+append(tokens13, tok(TK_COMMA, ","))
+append(tokens13, tok(TK_NUM, "3"))
+append(tokens13, tok(TK_RPAREN, ")"))
+
+p13 := pars.Parser("<test>", tokens13, rules)
+items := p13.parse_list(TK_RPAREN, TK_COMMA, 0)
+print(len(items))              # 3
+print(items[0].value)          # 1
+print(items[1].value)          # 2
+print(items[2].value)          # 3
+
+# ─── Test 14: parse_list empty ──────────────────────────────────────
+
+tokens14: List[pars.Token] = List[pars.Token]()
+append(tokens14, tok(TK_RPAREN, ")"))
+
+p14 := pars.Parser("<test>", tokens14, rules)
+items2 := p14.parse_list(TK_RPAREN, TK_COMMA, 0)
+print(len(items2))             # 0
+
+# ─── Test 15: format_error ──────────────────────────────────────────
+
+tokens15: List[pars.Token] = List[pars.Token]()
+append(tokens15, tok_at(TK_NUM, "x", 5, 12))
+
+p15 := pars.Parser("calc.mut", tokens15, rules)
+t15 := p15.current()
+msg := p15.format_error(t15, "bad number")
+print(msg)                     # calc.mut:5:12: error: bad number
+
+# ─── Test 16: Complex expression -(1 + 2) * 3 + 4 ──────────────────
+
+tokens16: List[pars.Token] = List[pars.Token]()
+append(tokens16, tok(TK_MINUS, "-"))
+append(tokens16, tok(TK_LPAREN, "("))
+append(tokens16, tok(TK_NUM, "1"))
+append(tokens16, tok(TK_PLUS, "+"))
+append(tokens16, tok(TK_NUM, "2"))
+append(tokens16, tok(TK_RPAREN, ")"))
+append(tokens16, tok(TK_STAR, "*"))
+append(tokens16, tok(TK_NUM, "3"))
+append(tokens16, tok(TK_PLUS, "+"))
+append(tokens16, tok(TK_NUM, "4"))
+
+p16 := pars.Parser("<test>", tokens16, rules)
+n16 := p16.expr(0)
+# Should be: +(*(-(+(1,2)), 3), 4)
+print(n16.value)               # +
+print(n16.child(0).value)      # *
+print(n16.child(1).value)      # 4
+print(n16.child(0).child(0).value)  # -  (unary neg)
+print(n16.child(0).child(1).value)  # 3
+
+# ─── Test 17: skip ──────────────────────────────────────────────────
+
+const TK_NL: i64 = 5
+
+tokens17: List[pars.Token] = List[pars.Token]()
+append(tokens17, tok(TK_NL, "\n"))
+append(tokens17, tok(TK_NL, "\n"))
+append(tokens17, tok(TK_NL, "\n"))
+append(tokens17, tok(TK_NUM, "42"))
+
+p17 := pars.Parser("<test>", tokens17, rules)
+p17.skip(TK_NL)
+print(p17.current().lexeme)    # 42
+
+# ─── Test 18: Node add_child ────────────────────────────────────────
+
+parent := pars.Node(100, "list", 1, 1)
+parent.add_child(pars.Node(100, "a", 1, 1))
+parent.add_child(pars.Node(100, "b", 1, 1))
+print(parent.child_count())    # 2
+print(parent.child(0).value)   # a
+print(parent.child(1).value)   # b
+
+# EXPECTED:
+# False
+# +
+# 2
+# 1
+# 2
+# +
+# 1
+# *
+# 2
+# 3
+# *
+# +
+# 3
+# 105
+# 1
+# 5
+# ^
+# 2
+# ^
+# 3
+# 4
+# True
+# True
+# 101:+
+#   100:1
+#   103:*
+#     100:2
+#     100:3
+# 101:+[2]
+# 105:-[1]
+# False
+# 2
+# True
+# True
+# 100
+# False
+# 10
+# True
+# 2
+# 2
+# 1
+# 3
+# 1
+# 2
+# 3
+# 0
+# calc.mut:5:12: error: bad number
+# +
+# *
+# 4
+# -
+# 3
+# 42
+# 2
+# a
+# b

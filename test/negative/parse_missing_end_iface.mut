@@ -1,0 +1,3 @@
+# Negative: missing 'end' to close interface
+interface IShape
+    def area(self) -> i64

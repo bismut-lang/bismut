@@ -1,0 +1,462 @@
+# cg_state.mut -- CodeGen state class for C code generation
+#
+# Manages the output buffer, variable scoping, refcount emission,
+# temporary variables, and shared state for all codegen modules.
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import parser as mp
+import cg_types as ct
+import type_utils as tu
+import import_resolver as ir
+
+# ─── VarInfo ─────────────────────────────────────────────────────────
+
+class VarInfo
+    c_name: str
+    ty: str
+    is_static: bool
+
+    def init(self, c_name: str, ty: str)
+        self.c_name = c_name
+        self.ty = ty
+        self.is_static = False
+    end
+end
+
+# ─── CodeGen ─────────────────────────────────────────────────────────
+
+class CodeGen
+    # Output buffer
+    out: List[str]
+    ind: i64
+    tmp: i64
+
+    # Variable scoping
+    env: List[Dict[str, VarInfo]]
+    scope_vars: List[List[VarInfo]]
+
+    # Type usage tracking for container/tuple/fn instantiation
+    used_list_tags: Dict[str, i64]
+    used_dict_tags: Dict[str, i64]
+    used_fn_types: Dict[str, i64]
+    used_tuple_types: Dict[str, i64]
+
+    # Function signature table: func_name -> "p1,p2,...|ret"
+    func_sigs: Dict[str, str]
+
+    # Current function return type (or "" outside functions)
+    cur_fn_ret: str
+
+    # Temporary owned refs that need releasing after current statement
+    pending_releases: List[VarInfo]
+
+    # Class/struct/interface AST nodes: name -> pars.Node
+    class_defs: Dict[str, pars.Node]
+    struct_defs: Dict[str, pars.Node]
+    iface_defs: Dict[str, pars.Node]
+
+    # class_name -> comma-separated interface names
+    class_implements: Dict[str, str]
+
+    # enum_name -> Dict[str, variant_name -> i64 value]
+    enum_variants: Dict[str, Dict[str, i64]]
+
+    # Extern info from import resolver
+    extern_info: ir.ExternInfo
+
+    # Scope depth management
+    global_scope_depth: i64
+    loop_scope_depth: List[i64]
+
+    # String literal interning: c_escaped -> var_name
+    string_lits: Dict[str, str]
+    string_lit_idx: i64
+    string_lit_insert_pos: i64
+
+    # Source file name
+    file: str
+
+    # Emit #line directives for source-level debugging
+    debug_lines: bool
+
+    # Current statement source location for #line emission
+    cur_debug_line: i64
+    cur_debug_file: str
+
+    # Track which globals are accessed from user functions
+    func_global_refs: Dict[str, i64]
+    in_user_func: bool
+
+    def init(self)
+        self.out = List[str]()
+        self.ind = 0
+        self.tmp = 0
+        self.env = List[Dict[str, VarInfo]]()
+        self.scope_vars = List[List[VarInfo]]()
+        self.used_list_tags = Dict[str, i64]()
+        self.used_dict_tags = Dict[str, i64]()
+        self.used_fn_types = Dict[str, i64]()
+        self.used_tuple_types = Dict[str, i64]()
+        self.func_sigs = Dict[str, str]()
+        self.cur_fn_ret = ""
+        self.pending_releases = List[VarInfo]()
+        self.class_defs = Dict[str, pars.Node]()
+        self.struct_defs = Dict[str, pars.Node]()
+        self.iface_defs = Dict[str, pars.Node]()
+        self.class_implements = Dict[str, str]()
+        self.enum_variants = Dict[str, Dict[str, i64]]()
+        self.extern_info = ir.ExternInfo()
+        self.global_scope_depth = 0
+        self.loop_scope_depth = List[i64]()
+        self.string_lits = Dict[str, str]()
+        self.string_lit_idx = 0
+        self.string_lit_insert_pos = 0
+        self.file = ""
+        self.debug_lines = False
+        self.cur_debug_line = 0
+        self.cur_debug_file = ""
+        self.func_global_refs = Dict[str, i64]()
+        self.in_user_func = False
+    end
+
+    # ─── Output ──────────────────────────────────────────────────
+
+    def w(self, s: str)
+        sb := stringbuilder.new()
+        # Emit #line directive if we're tracking a source location
+        if self.cur_debug_line > 0 and len(self.cur_debug_file) > 0
+            i: i64 = 0
+            while i < self.ind
+                stringbuilder.append_str(sb, "  ")
+                i += 1
+            end
+            stringbuilder.append_str(sb, format("#line {} \"{}\"", self.cur_debug_line, self.cur_debug_file))
+            append(self.out, stringbuilder.build(sb))
+            sb = stringbuilder.new()
+        end
+        i2: i64 = 0
+        while i2 < self.ind
+            stringbuilder.append_str(sb, "  ")
+            i2 += 1
+        end
+        stringbuilder.append_str(sb, s)
+        append(self.out, stringbuilder.build(sb))
+    end
+
+    def w_empty(self)
+        append(self.out, "")
+    end
+
+    def new_tmp(self) -> str
+        self.tmp += 1
+        return format("_t{}", self.tmp)
+    end
+
+    # ─── Scope management ────────────────────────────────────────
+
+    def push_scope(self)
+        append(self.env, Dict[str, VarInfo]())
+        append(self.scope_vars, List[VarInfo]())
+    end
+
+    def pop_scope(self, src: str)
+        vars := self.scope_vars[len(self.scope_vars) - 1]
+        # Release in reverse (skip static vars)
+        i := len(vars) - 1
+        while i >= 0
+            v := vars[i]
+            if ct.is_ref_type(v.ty) and not v.is_static
+                self.emit_release(v, src)
+            end
+            i -= 1
+        end
+        # Pop
+        pop(self.env)
+        pop(self.scope_vars)
+    end
+
+    def declare_var(self, name: str, ty: str) -> VarInfo
+        self.tmp += 1
+        c_name := format("{}_{}", name, self.tmp)
+        vi := VarInfo(c_name, ty)
+        self.env[len(self.env) - 1][name] = vi
+        append(self.scope_vars[len(self.scope_vars) - 1], vi)
+        return vi
+    end
+
+    def lookup(self, name: str) -> VarInfo
+        i := len(self.env) - 1
+        while i >= 0
+            if has(self.env[i], name)
+                # Track globals accessed from user functions
+                if self.in_user_func and i < self.global_scope_depth
+                    self.func_global_refs[name] = 1
+                end
+                return self.env[i][name]
+            end
+            i -= 1
+        end
+        # Should never happen after typechecking
+        return VarInfo(format("__UNDEF_{}", name), "i64")
+    end
+
+    # ─── Refcount emission ───────────────────────────────────────
+
+    def emit_release(self, v: VarInfo, src: str)
+        ty := v.ty
+        if ty == "str"
+            self.w(format("__lang_rt_str_release({}); (void){};", v.c_name, src))
+        elif tu.is_list_type(ty)
+            tag := ct.elem_tag(tu.list_elem_type(ty))
+            self.w(format("__lang_rt_list_{}_release({}); (void){};", tag, v.c_name, src))
+        elif tu.is_dict_type(ty)
+            combined := ct.dict_combined_tag(ty)
+            self.w(format("__lang_rt_dict_{}_release({}); (void){};", combined, v.c_name, src))
+        elif ct.is_iface(ty)
+            self.w(format("if ({}.obj) {}.vtbl->release({}.obj); (void){};", v.c_name, v.c_name, v.c_name, src))
+        elif ct.is_class(ty)
+            self.w(format("if ({}) __lang_rt_class_{}_release({}); (void){};", v.c_name, ty, v.c_name, src))
+        elif tu.is_tuple_type(ty)
+            elems := tu.tuple_elem_types(ty)
+            i: i64 = 0
+            while i < len(elems)
+                if ct.is_ref_type(elems[i])
+                    fld := format("{}.f{}", v.c_name, i)
+                    fvi := VarInfo(fld, elems[i])
+                    self.emit_release(fvi, src)
+                end
+                i += 1
+            end
+        end
+    end
+
+    def emit_retain_value(self, ty: str, expr: str, src: str)
+        if ty == "str"
+            self.w(format("if ({}) __lang_rt_str_retain({}); (void){};", expr, expr, src))
+        elif tu.is_list_type(ty)
+            tag := ct.elem_tag(tu.list_elem_type(ty))
+            self.w(format("if ({}) __lang_rt_list_{}_retain({}); (void){};", expr, tag, expr, src))
+        elif tu.is_dict_type(ty)
+            combined := ct.dict_combined_tag(ty)
+            self.w(format("if ({}) __lang_rt_dict_{}_retain({}); (void){};", expr, combined, expr, src))
+        elif ct.is_iface(ty)
+            self.w(format("if ({}.obj) {}.vtbl->retain({}.obj); (void){};", expr, expr, expr, src))
+        elif ct.is_class(ty)
+            self.w(format("if ({}) __lang_rt_class_{}_retain({}); (void){};", expr, ty, expr, src))
+        elif tu.is_tuple_type(ty)
+            elems := tu.tuple_elem_types(ty)
+            i: i64 = 0
+            while i < len(elems)
+                if ct.is_ref_type(elems[i])
+                    fld := format("{}.f{}", expr, i)
+                    self.emit_retain_value(elems[i], fld, src)
+                end
+                i += 1
+            end
+        end
+    end
+
+    def maybe_wrap_iface(self, expr_c: str, src_ty: str, dst_ty: str) -> str
+        if ct.is_iface(dst_ty) and ct.is_class(src_ty)
+            return format("(__lang_rt_Iface_{}){{.obj = {}, .vtbl = &__lang_rt_vtbl_{}_as_{}}}", dst_ty, expr_c, src_ty, dst_ty)
+        end
+        if ct.is_iface(dst_ty) and src_ty == "none"
+            return format("(__lang_rt_Iface_{}){{.obj = NULL, .vtbl = NULL}}", dst_ty)
+        end
+        return expr_c
+    end
+
+    # ─── Type use tracking ───────────────────────────────────────
+
+    def mark_type_use(self, tname: str)
+        if tu.is_list_type(tname)
+            elem := tu.list_elem_type(tname)
+            tag := ct.elem_tag(elem)
+            self.used_list_tags[tag] = 1
+            self.mark_type_use(elem)
+        end
+        if tu.is_dict_type(tname)
+            combined := ct.dict_combined_tag(tname)
+            self.used_dict_tags[combined] = 1
+            self.mark_type_use(tu.dict_key_type(tname))
+            self.mark_type_use(tu.dict_val_type(tname))
+        end
+        if tu.is_fn_type(tname)
+            self.used_fn_types[tname] = 1
+        end
+        if tu.is_tuple_type(tname)
+            self.used_tuple_types[tname] = 1
+            elems := tu.tuple_elem_types(tname)
+            i: i64 = 0
+            while i < len(elems)
+                self.mark_type_use(elems[i])
+                i += 1
+            end
+        end
+    end
+
+    # ─── Pending releases ────────────────────────────────────────
+
+    def flush_pending_releases(self, src: str)
+        i: i64 = 0
+        while i < len(self.pending_releases)
+            self.emit_release(self.pending_releases[i], src)
+            i += 1
+        end
+        self.pending_releases = List[VarInfo]()
+    end
+
+    def emit_arg_safe(self, arg: pars.Node, ac: str, aty: str) -> str
+        # If argument is owned ref, materialize to temp and schedule cleanup
+        if ct.is_ref_type(aty) and not expr_is_borrowed(arg)
+            tmp := self.new_tmp()
+            self.w(format("{} {} = {};", ct.c_type(aty), tmp, ac))
+            append(self.pending_releases, VarInfo(tmp, aty))
+            return tmp
+        end
+        return ac
+    end
+
+    # ─── Scope cleanup ───────────────────────────────────────────
+
+    def release_all_scopes(self, src: str)
+        # Release locals from inner to outer, stop before global scope
+        i := len(self.scope_vars) - 1
+        while i >= self.global_scope_depth
+            scope := self.scope_vars[i]
+            j := len(scope) - 1
+            while j >= 0
+                v := scope[j]
+                if ct.is_ref_type(v.ty) and not v.is_static
+                    self.emit_release(v, src)
+                end
+                j -= 1
+            end
+            i -= 1
+        end
+    end
+
+    def release_loop_scopes(self, src: str)
+        # Release ref-type locals from current scope down to loop boundary
+        depth := self.loop_scope_depth[len(self.loop_scope_depth) - 1]
+        i := len(self.scope_vars) - 1
+        while i >= depth
+            scope := self.scope_vars[i]
+            j := len(scope) - 1
+            while j >= 0
+                v := scope[j]
+                if ct.is_ref_type(v.ty) and not v.is_static
+                    self.emit_release(v, src)
+                end
+                j -= 1
+            end
+            i -= 1
+        end
+    end
+
+    def emit_default_return(self, ret_ty: str, src: str)
+        self.flush_pending_releases(src)
+        self.release_all_scopes(src)
+        self.emit_return_default_for(ret_ty, src)
+    end
+
+    def emit_return_default_for(self, ret_ty: str, src: str)
+        if len(ret_ty) == 0 or ret_ty == "void"
+            self.w("return;")
+            return
+        end
+        if ret_ty == "i8" or ret_ty == "i16" or ret_ty == "i32" or ret_ty == "i64" or ret_ty == "u8" or ret_ty == "u16" or ret_ty == "u32" or ret_ty == "u64"
+            self.w("return 0;")
+        elif ret_ty == "f32" or ret_ty == "f64"
+            self.w("return 0.0;")
+        elif ret_ty == "bool"
+            self.w("return false;")
+        elif ret_ty == "str"
+            self.w("return (__lang_rt_Str*)0;")
+        elif tu.is_list_type(ret_ty) or tu.is_dict_type(ret_ty)
+            self.w("return (void*)0;")
+        elif ct.is_class(ret_ty)
+            self.w(format("return (__lang_rt_Class_{}*)0;", ret_ty))
+        elif ct.is_iface(ret_ty)
+            self.w(format("return (__lang_rt_Iface_{}){{.obj = NULL, .vtbl = NULL}};", ret_ty))
+        elif tu.is_tuple_type(ret_ty)
+            sn := ct.tuple_struct_name(ret_ty)
+            self.w(format("return ({}){{0}};", sn))
+        elif ct.is_struct(ret_ty)
+            ct_str := ct.c_type(ret_ty)
+            self.w(format("return ({}){{0}};", ct_str))
+        else
+            self.w("return 0;")
+        end
+    end
+
+    # ─── Source location helper ──────────────────────────────────
+
+    def src(self, n: pars.Node) -> str
+        return ct.src_str(self.file, n.line, n.col)
+    end
+
+    # ─── String literal interning ────────────────────────────────
+
+    def intern_string(self, c_escaped: str) -> str
+        if has(self.string_lits, c_escaped)
+            return self.string_lits[c_escaped]
+        end
+        self.string_lit_idx += 1
+        name := format("___lang_rt_lit_{}", self.string_lit_idx)
+        self.string_lits[c_escaped] = name
+        return name
+    end
+end
+
+# ─── Borrowed expression check (node-level, no state needed) ────────
+
+def expr_is_borrowed(e: pars.Node) -> bool
+    k := e.kind
+    # None → NULL, no retain/release
+    if k == mp.NodeKind.NONE_LIT
+        return True
+    end
+    # String literal → immortal static
+    if k == mp.NodeKind.STRING_LIT
+        return True
+    end
+    # Member access → borrowed from object (or enum variant = constant)
+    if k == mp.NodeKind.MEMBER
+        if e.child_count() > 0 and e.child(0).kind == mp.NodeKind.IDENT
+            if ct.is_enum(e.child(0).value)
+                return True
+            end
+        end
+        return True
+    end
+    # Index → borrowed from container
+    if k == mp.NodeKind.INDEX
+        return True
+    end
+    # Downcast (as) → borrowed pointer from fat pointer
+    if k == mp.NodeKind.AS
+        return True
+    end
+    # Tuple expressions → create new value (owned)
+    if k == mp.NodeKind.TUPLE_EXPR
+        return False
+    end
+    # Builtin get/lookup → borrowed from container
+    if k == mp.NodeKind.CALL and e.child_count() > 0
+        callee := e.child(0)
+        if callee.kind == mp.NodeKind.IDENT
+            if callee.value == "get" or callee.value == "lookup"
+                return True
+            end
+        end
+    end
+    # Variable read → borrowed
+    if k == mp.NodeKind.IDENT
+        return True
+    end
+    return False
+end

@@ -1,0 +1,77 @@
+# Test preprocessor directives
+
+# --- @define and @if ---
+@define TESTING
+
+@if TESTING
+x: i64 = 1
+@else
+x: i64 = 999
+@end
+print(x)
+
+# --- @if with undefined name (should skip) ---
+@if UNDEFINED_THING
+y: i64 = 999
+@else
+y: i64 = 2
+@end
+print(y)
+
+# --- @elif branches ---
+@define MODE_B
+
+@if MODE_A
+mode: i64 = 1
+@elif MODE_B
+mode: i64 = 2
+@elif MODE_C
+mode: i64 = 3
+@else
+mode: i64 = 0
+@end
+print(mode)
+
+# --- Nested @if ---
+@define OUTER
+@define INNER
+
+@if OUTER
+    @if INNER
+    nested: i64 = 42
+    @else
+    nested: i64 = 0
+    @end
+@else
+nested: i64 = -1
+@end
+print(nested)
+
+# --- Platform constant (should be defined on Linux) ---
+@if __LINUX__
+platform: str = "linux"
+@elif __MACOS__
+platform: str = "macos"
+@elif __WIN__
+platform: str = "windows"
+@else
+platform: str = "unknown"
+@end
+print(platform)
+
+# --- @define inside conditional (only evaluated when emitting) ---
+@if UNDEFINED_GATE
+@define SECRET
+@end
+
+@if SECRET
+secret: i64 = 999
+@else
+secret: i64 = 0
+@end
+print(secret)
+
+# --- Regular code unaffected ---
+a: i64 = 10
+b: i64 = 20
+print(a + b)

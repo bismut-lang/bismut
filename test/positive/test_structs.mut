@@ -1,0 +1,111 @@
+# Test: struct value types
+
+# Basic struct definition and construction
+struct Vec2
+    x: f64
+    y: f64
+end
+
+v := Vec2(3.0, 4.0)
+print(v.x)
+print(v.y)
+
+# Field mutation
+v.x = 10.0
+print(v.x)
+
+# Value copy semantics — modifying copy does not affect original
+v2 := v
+v2.x = 99.0
+print(v.x)
+print(v2.x)
+
+# Struct with methods
+struct Point
+    x: i64
+    y: i64
+
+    def sum(self) -> i64
+        return self.x + self.y
+    end
+
+    def scale(self, factor: i64) -> Point
+        return Point(self.x * factor, self.y * factor)
+    end
+end
+
+p := Point(3, 7)
+print(p.sum())
+p2 := p.scale(10)
+print(p2.x)
+print(p2.y)
+
+# Struct in function parameter and return
+def make_point(a: i64, b: i64) -> Point
+    return Point(a, b)
+end
+
+def point_sum(p: Point) -> i64
+    return p.x + p.y
+end
+
+p3 := make_point(100, 200)
+print(point_sum(p3))
+
+# Struct in List
+nums: List[Point] = List[Point]()
+append(nums, Point(1, 2))
+append(nums, Point(3, 4))
+print(len(nums))
+print(nums[0].x)
+print(nums[1].y)
+
+# Struct with bool and integer fields
+struct Flags
+    a: bool
+    b: bool
+    count: i64
+end
+
+f := Flags(True, False, 42)
+print(f.a)
+print(f.b)
+print(f.count)
+
+# Compound assignment on struct fields
+f.count += 8
+print(f.count)
+
+# Nested structs (struct containing another struct)
+struct Rect
+    origin: Point
+    size: Point
+end
+
+r := Rect(Point(1, 2), Point(10, 20))
+print(r.origin.x)
+print(r.origin.y)
+print(r.size.x)
+print(r.size.y)
+
+# Expected output:
+# 3
+# 4
+# 10
+# 10
+# 99
+# 10
+# 30
+# 70
+# 300
+# 2
+# 1
+# 4
+# true
+# false
+# 42
+# 50
+# 1
+# 2
+# 10
+# 20

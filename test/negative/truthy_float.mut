@@ -1,0 +1,5 @@
+# Floats do not support truthiness
+x: f64 = 3.14
+if x
+    print(1)
+end

@@ -1,0 +1,2 @@
+# ERROR: tuple with unknown element type
+x: (i64, Foo) = (1, 2)

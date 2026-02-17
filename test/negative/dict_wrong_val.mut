@@ -1,0 +1,3 @@
+# Negative: assign wrong type to dict value
+d: Dict[str, i64] = Dict[str, i64]()
+d["x"] = "hello"

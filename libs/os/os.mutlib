@@ -1,0 +1,8 @@
+# os — process execution, time, and system access
+
+[functions]
+exec(cmd: str) -> i64 = __clib__os_exec
+time_now() -> f64 = __clib__os_time_now
+exit(code: i64) -> void = __clib__os_exit
+argc() -> i64 = __clib__os_argc
+argv(index: i64) -> str = __clib__os_argv

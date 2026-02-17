@@ -1,0 +1,743 @@
+# import_resolver.mut -- Import and extern resolution for the Bismut compiler
+#
+# Resolves import and extern declarations in a PROGRAM AST:
+#   - Imports: find, parse, rename, and merge module ASTs
+#   - Externs: find libs, parse .mutlib manifests, inject synthetic declarations
+#   - Rewrite dotted references (alias.X -> alias__X) in expressions
+
+extern string
+extern stringbuilder
+extern filesystem
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+import preprocessor as pp
+import mutlib as ml
+import strutils as su
+import pathutils as pu
+
+# ─── Helpers ─────────────────────────────────────────────────────────
+
+def _list_add_unique(lst: List[str], val: str)
+    i: i64 = 0
+    while i < len(lst)
+        if lst[i] == val
+            return
+        end
+        i += 1
+    end
+    append(lst, val)
+end
+
+# ─── ExternInfo: metadata that codegen needs ─────────────────────────
+
+class ExternTypeInfo
+    c_type: str
+    c_dtor: str
+
+    def init(self, c_type: str, c_dtor: str)
+        self.c_type = c_type
+        self.c_dtor = c_dtor
+    end
+end
+
+class ExternConstInfo
+    c_expr: str
+    ty: str
+
+    def init(self, c_expr: str, ty: str)
+        self.c_expr = c_expr
+        self.ty = ty
+    end
+end
+
+class ExternInfo
+    includes: List[str]
+    cflags: List[str]
+    ldflags: List[str]
+    type_info: Dict[str, ExternTypeInfo]
+    constants: Dict[str, ExternConstInfo]
+
+    def init(self)
+        self.includes = List[str]()
+        self.cflags = List[str]()
+        self.ldflags = List[str]()
+        self.type_info = Dict[str, ExternTypeInfo]()
+        self.constants = Dict[str, ExternConstInfo]()
+    end
+
+    def add_type(self, mangled: str, c_type: str, c_dtor: str)
+        self.type_info[mangled] = ExternTypeInfo(c_type, c_dtor)
+    end
+
+    def add_constant(self, mangled: str, c_expr: str, ty: str)
+        self.constants[mangled] = ExternConstInfo(c_expr, ty)
+    end
+
+    def add_include(self, path: str)
+        _list_add_unique(self.includes, path)
+    end
+
+    def add_cflag(self, flag: str)
+        _list_add_unique(self.cflags, flag)
+    end
+
+    def add_ldflag(self, flag: str)
+        _list_add_unique(self.ldflags, flag)
+    end
+
+    def type_c_type(self, mangled: str) -> str
+        return self.type_info[mangled].c_type
+    end
+
+    def type_c_dtor(self, mangled: str) -> str
+        return self.type_info[mangled].c_dtor
+    end
+
+    def const_c_expr(self, mangled: str) -> str
+        return self.constants[mangled].c_expr
+    end
+
+    def const_type(self, mangled: str) -> str
+        return self.constants[mangled].ty
+    end
+
+    def merge(self, other: ExternInfo)
+        i: i64 = 0
+        while i < len(other.includes)
+            self.add_include(other.includes[i])
+            i += 1
+        end
+        i = 0
+        while i < len(other.cflags)
+            self.add_cflag(other.cflags[i])
+            i += 1
+        end
+        i = 0
+        while i < len(other.ldflags)
+            self.add_ldflag(other.ldflags[i])
+            i += 1
+        end
+        k := keys(other.type_info)
+        i = 0
+        while i < len(k)
+            self.type_info[k[i]] = other.type_info[k[i]]
+            i += 1
+        end
+        k = keys(other.constants)
+        i = 0
+        while i < len(k)
+            self.constants[k[i]] = other.constants[k[i]]
+            i += 1
+        end
+    end
+end
+
+# ─── Module path helper ──────────────────────────────────────────────
+
+def _dots_to_path(module: str) -> str
+    return string.concat(su.replace(module, ".", "/"), ".mut")
+end
+
+# ─── Type string renaming ────────────────────────────────────────────
+
+def _is_ident_char(c: i64) -> bool
+    return su.is_alnum(c) or c == '_'
+end
+
+def _rename_type_str(s: str, rmap: Dict[str, str]) -> str
+    # Scan through, identify identifier tokens, rename if in rmap
+    sb := stringbuilder.new()
+    slen := len(s)
+    i: i64 = 0
+    while i < slen
+        c := s[i]
+        if su.is_alpha(c) or c == '_'
+            start := i
+            while i < slen and _is_ident_char(s[i])
+                i += 1
+            end
+            name := string.substr(s, start, i - start)
+            if has(rmap, name)
+                stringbuilder.append_str(sb, rmap[name])
+            else
+                stringbuilder.append_str(sb, name)
+            end
+        else
+            stringbuilder.append_str(sb, string.chr(c))
+            i += 1
+        end
+    end
+    return stringbuilder.build(sb)
+end
+
+# ─── AST walkers ─────────────────────────────────────────────────────
+
+def _walk_rename(node: pars.Node, rmap: Dict[str, str])
+    # Rename identifiers and type references within a module's AST
+    k := node.kind
+
+    if k == mp.NodeKind.IDENT
+        if has(rmap, node.value)
+            node.value = rmap[node.value]
+        end
+    elif k == mp.NodeKind.TYPE or k == mp.NodeKind.TYPE_LIST or k == mp.NodeKind.TYPE_DICT or k == mp.NodeKind.TYPE_FN
+        node.value = _rename_type_str(node.value, rmap)
+    elif k == mp.NodeKind.IS or k == mp.NodeKind.AS
+        if has(rmap, node.value)
+            node.value = rmap[node.value]
+        end
+    elif k == mp.NodeKind.CALL
+        if len(node.value) > 0
+            node.value = _rename_type_str(node.value, rmap)
+        end
+    elif k == mp.NodeKind.LIST_LIT or k == mp.NodeKind.DICT_LIT
+        node.value = _rename_type_str(node.value, rmap)
+    end
+
+    # Recurse into children
+    i: i64 = 0
+    while i < node.child_count()
+        _walk_rename(node.child(i), rmap)
+        i += 1
+    end
+end
+
+def _collect_local_names(node: pars.Node, names: Dict[str, i64])
+    # Collect all variable/parameter names declared in a scope
+    k := node.kind
+    if k == mp.NodeKind.PARAM
+        names[node.value] = 1
+        return
+    end
+    if k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL or k == mp.NodeKind.STATIC_DECL
+        names[node.value] = 1
+    elif k == mp.NodeKind.FOR
+        names[node.value] = 1
+    elif k == mp.NodeKind.TUPLE_DESTRUCT
+        # Children: N IDENT nodes (names), then 1 expression (value)
+        # All but the last child are name identifiers
+        count := node.child_count()
+        if count > 1
+            j: i64 = 0
+            while j < count - 1
+                c := node.child(j)
+                if c.kind == mp.NodeKind.IDENT
+                    names[c.value] = 1
+                end
+                j += 1
+            end
+        end
+    end
+    i: i64 = 0
+    while i < node.child_count()
+        _collect_local_names(node.child(i), names)
+        i += 1
+    end
+end
+
+def _walk_resolve(node: pars.Node, aliases: Dict[str, i64])
+    k := node.kind
+
+    # For function/method declarations, compute a scope-local effective alias set
+    if k == mp.NodeKind.FUNC_DECL
+        # Collect parameter + local variable names
+        local_names: Dict[str, i64] = Dict[str, i64]()
+        i: i64 = 0
+        while i < node.child_count()
+            _collect_local_names(node.child(i), local_names)
+            i += 1
+        end
+
+        # Check if any local name shadows an alias
+        effective := aliases
+        shadow: bool = False
+        lk := keys(local_names)
+        j: i64 = 0
+        while j < len(lk)
+            if has(aliases, lk[j])
+                shadow = True
+            end
+            j += 1
+        end
+
+        if shadow
+            # Build reduced alias set
+            effective = Dict[str, i64]()
+            ak := keys(aliases)
+            j = 0
+            while j < len(ak)
+                if not has(local_names, ak[j])
+                    effective[ak[j]] = 1
+                end
+                j += 1
+            end
+        end
+
+        # Recurse children with effective aliases
+        i = 0
+        while i < node.child_count()
+            _walk_resolve(node.child(i), effective)
+            i += 1
+        end
+
+        # No MEMBER rewriting needed on FUNC_DECL itself
+        return
+    end
+
+    # Recurse into children first (bottom-up for nested mod.Enum.VARIANT)
+    i: i64 = 0
+    while i < node.child_count()
+        _walk_resolve(node.child(i), aliases)
+        i += 1
+    end
+
+    # Convert MEMBER(value="X", [IDENT("alias")]) -> IDENT("alias__X")
+    if node.kind == mp.NodeKind.MEMBER and node.child_count() > 0
+        obj := node.child(0)
+        if obj.kind == mp.NodeKind.IDENT and has(aliases, obj.value)
+            mangled := string.concat(string.concat(obj.value, "__"), node.value)
+            node.kind = mp.NodeKind.IDENT
+            node.value = mangled
+            node.children = List[pars.Node]()
+        end
+    end
+end
+
+# ─── Synthetic AST node creation ─────────────────────────────────────
+
+def _make_synthetic_func(name: str, param_names: List[str], param_types: List[str], ret_type: str, c_name: str) -> pars.Node
+    n := pars.Node(mp.NodeKind.FUNC_DECL, name, 0, 0)
+
+    # Params block
+    params := pars.Node(mp.NodeKind.BLOCK, "params", 0, 0)
+    i: i64 = 0
+    while i < len(param_names)
+        p := pars.Node(mp.NodeKind.PARAM, param_names[i], 0, 0)
+        ty := pars.Node(mp.NodeKind.TYPE, param_types[i], 0, 0)
+        p.add_child(ty)
+        params.add_child(p)
+        i += 1
+    end
+    n.add_child(params)
+
+    # Return type
+    rt := pars.Node(mp.NodeKind.TYPE, ret_type, 0, 0)
+    n.add_child(rt)
+
+    # Empty body
+    body := pars.Node(mp.NodeKind.BLOCK, "", 0, 0)
+    n.add_child(body)
+
+    # Mark as extern by storing c_name in the type annotation field ('ty')
+    n.ty = c_name
+
+    return n
+end
+
+def _make_synthetic_class(name: str) -> pars.Node
+    return pars.Node(mp.NodeKind.CLASS_DECL, name, 0, 0)
+end
+
+def _make_synthetic_var(name: str, ty_name: str, is_const: bool) -> pars.Node
+    kind: i64 = mp.NodeKind.VAR_DECL
+    if is_const
+        kind = mp.NodeKind.CONST_DECL
+    end
+    n := pars.Node(kind, name, 0, 0)
+    ty := pars.Node(mp.NodeKind.TYPE, ty_name, 0, 0)
+    n.add_child(ty)
+    # Dummy value — use the right literal kind for the type
+    val_kind: i64 = mp.NodeKind.INT_LIT
+    if ty_name == "f64" or ty_name == "f32"
+        val_kind = mp.NodeKind.FLOAT_LIT
+    elif ty_name == "str"
+        val_kind = mp.NodeKind.STRING_LIT
+    elif ty_name == "bool"
+        val_kind = mp.NodeKind.BOOL_LIT
+    end
+    val := pars.Node(val_kind, "0", 0, 0)
+    n.add_child(val)
+    return n
+end
+
+# ─── Extern resolution ───────────────────────────────────────────────
+
+def _resolve_externs(prog: pars.Node, src_file: str, compiler_dir: str, info: ExternInfo, s: sink.Sink, defines: List[str])
+    aliases: Dict[str, i64] = Dict[str, i64]()
+    seen_libs: Dict[str, i64] = Dict[str, i64]()
+
+    # Derive target platform from defines
+    target_plat := ""
+    di: i64 = 0
+    while di < len(defines)
+        if defines[di] == "__LINUX__"
+            target_plat = "linux"
+        elif defines[di] == "__MACOS__"
+            target_plat = "macos"
+        elif defines[di] == "__WIN__"
+            target_plat = "win"
+        end
+        di += 1
+    end
+
+    # Collect existing names for deduplication
+    existing: Dict[str, i64] = Dict[str, i64]()
+    i: i64 = 0
+    while i < prog.child_count()
+        c := prog.child(i)
+        k := c.kind
+        if k == mp.NodeKind.FUNC_DECL or k == mp.NodeKind.CLASS_DECL or k == mp.NodeKind.STRUCT_DECL or k == mp.NodeKind.INTERFACE_DECL or k == mp.NodeKind.ENUM_DECL or k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL
+            existing[c.value] = 1
+        end
+        i += 1
+    end
+
+    # Process each EXTERN declaration
+    externs: List[pars.Node] = List[pars.Node]()
+    i = 0
+    while i < prog.child_count()
+        c := prog.child(i)
+        if c.kind == mp.NodeKind.EXTERN
+            lib_name := c.value
+            alias := c.child(0).value
+
+            lib_dir := ml.find_lib(lib_name, src_file, compiler_dir)
+            if len(lib_dir) == 0
+                s.error(c.value, c.line, c.col, 0, format("extern error: library '{}' not found", lib_name))
+                i += 1
+                continue
+            end
+
+            manifest_path := pu.path_join(lib_dir, string.concat(lib_name, ".mutlib"))
+            data := ml.parse_mutlib(manifest_path, lib_name, lib_dir, target_plat)
+
+            # Collect lib type names for param type mangling
+            lib_types: Dict[str, i64] = Dict[str, i64]()
+            j: i64 = 0
+            while j < len(data.types)
+                lib_types[data.types[j].bismut_name] = 1
+                j += 1
+            end
+
+            # Inject synthetic ClassDecl for each extern type
+            j = 0
+            while j < len(data.types)
+                t := data.types[j]
+                mangled := string.concat(string.concat(alias, "__"), t.bismut_name)
+                if not has(existing, mangled)
+                    append(externs, _make_synthetic_class(mangled))
+                    existing[mangled] = 1
+                end
+                c_dtor := t.c_dtor
+                info.add_type(mangled, t.c_type, c_dtor)
+                j += 1
+            end
+
+            # Inject synthetic FuncDecl for each extern function
+            j = 0
+            while j < len(data.funcs)
+                f := data.funcs[j]
+                fname := string.concat(string.concat(alias, "__"), f.bismut_name)
+
+                # Mangle param types that reference lib types
+                mangled_ptypes: List[str] = List[str]()
+                pi: i64 = 0
+                while pi < len(f.param_types)
+                    pt := f.param_types[pi]
+                    if has(lib_types, pt)
+                        append(mangled_ptypes, string.concat(string.concat(alias, "__"), pt))
+                    else
+                        append(mangled_ptypes, pt)
+                    end
+                    pi += 1
+                end
+
+                ret := f.ret_type
+                if has(lib_types, ret)
+                    ret = string.concat(string.concat(alias, "__"), ret)
+                end
+
+                if not has(existing, fname)
+                    append(externs, _make_synthetic_func(fname, f.param_names, mangled_ptypes, ret, f.c_name))
+                    existing[fname] = 1
+                end
+                j += 1
+            end
+
+            # Inject synthetic const declarations
+            j = 0
+            while j < len(data.consts)
+                ec := data.consts[j]
+                mangled := string.concat(string.concat(alias, "__"), ec.bismut_name)
+                if not has(existing, mangled)
+                    append(externs, _make_synthetic_var(mangled, ec.ty, True))
+                    existing[mangled] = 1
+                end
+                info.add_constant(mangled, ec.c_expr, ec.ty)
+                j += 1
+            end
+
+            # Register C source and flags (deduplicated by lib name)
+            if not has(seen_libs, lib_name)
+                if len(data.c_source) > 0
+                    info.add_include(data.c_source)
+                end
+                ci: i64 = 0
+                while ci < len(data.cflags)
+                    info.add_cflag(data.cflags[ci])
+                    ci += 1
+                end
+                ci = 0
+                while ci < len(data.ldflags)
+                    info.add_ldflag(data.ldflags[ci])
+                    ci += 1
+                end
+                seen_libs[lib_name] = 1
+            end
+
+            aliases[alias] = 1
+        end
+        i += 1
+    end
+
+    # Prepend synthetic declarations and remove EXTERN nodes
+    if len(externs) > 0 or len(aliases) > 0
+        new_children: List[pars.Node] = List[pars.Node]()
+
+        # Synthetic declarations first
+        j: i64 = 0
+        while j < len(externs)
+            append(new_children, externs[j])
+            j += 1
+        end
+
+        # Original children, skipping EXTERN nodes
+        j = 0
+        while j < prog.child_count()
+            c := prog.child(j)
+            if c.kind != mp.NodeKind.EXTERN
+                append(new_children, c)
+            end
+            j += 1
+        end
+        prog.children = new_children
+    end
+
+    # Rewrite dotted references for extern aliases
+    if len(aliases) > 0
+        _walk_resolve(prog, aliases)
+    end
+end
+
+# ─── Import resolution ───────────────────────────────────────────────
+
+def _parse_module_file(path: str, s: sink.Sink, defines: List[str]) -> pars.Node
+    src := filesystem.read(path)
+    src = pp.preprocess_with_defines(src, path, defines)
+    return mp.parse(path, src, s)
+end
+
+def _resolve_imports(prog: pars.Node, base_dir: str, loading: Dict[str, i64], compiler_dir: str, info: ExternInfo, s: sink.Sink, defines: List[str])
+    aliases: Dict[str, i64] = Dict[str, i64]()
+
+    # Collect IMPORT nodes
+    imports: List[pars.Node] = List[pars.Node]()
+    i: i64 = 0
+    while i < prog.child_count()
+        if prog.child(i).kind == mp.NodeKind.IMPORT
+            append(imports, prog.child(i))
+        end
+        i += 1
+    end
+
+    if len(imports) == 0
+        return
+    end
+
+    # Process each import
+    merged: List[pars.Node] = List[pars.Node]()
+    ii: i64 = 0
+    while ii < len(imports)
+        imp := imports[ii]
+        module_path := imp.value
+        alias := imp.child(0).value
+
+        # Resolve file path
+        rel := _dots_to_path(module_path)
+        mod_path := pu.path_normalize(pu.path_join(base_dir, rel))
+        if not filesystem.exists(mod_path)
+            mod_path = pu.path_normalize(pu.path_join(pu.path_join(compiler_dir, "modules"), rel))
+        end
+        if not filesystem.exists(mod_path)
+            mod_path = pu.path_normalize(pu.path_join(pu.path_join(compiler_dir, "src"), rel))
+        end
+        if not filesystem.exists(mod_path)
+            s.error(imp.value, imp.line, imp.col, 0, format("import error: module '{}' not found", module_path))
+            ii += 1
+            continue
+        end
+
+        # Circular import check (value 1 = currently loading)
+        if has(loading, mod_path) and loading[mod_path] == 1
+            s.error(imp.value, imp.line, imp.col, 0, format("import error: circular import of '{}'", module_path))
+            ii += 1
+            continue
+        end
+
+        # Parse the module
+        loading[mod_path] = 1
+        mod := _parse_module_file(mod_path, s, defines)
+        if s.has_errors()
+            ii += 1
+            continue
+        end
+
+        # Recursively resolve imports and externs in the module
+        mod_dir := pu.path_dir(mod_path)
+        _resolve_imports(mod, mod_dir, loading, compiler_dir, info, s, defines)
+        if s.has_errors()
+            ii += 1
+            continue
+        end
+        _resolve_externs(mod, mod_path, compiler_dir, info, s, defines)
+        if s.has_errors()
+            ii += 1
+            continue
+        end
+
+        # Mark as fully loaded (0 = done, no longer in-progress)
+        loading[mod_path] = 0
+
+        # Collect names that were injected by extern resolution (already mangled)
+        extern_names: Dict[str, i64] = Dict[str, i64]()
+        j: i64 = 0
+        while j < mod.child_count()
+            c := mod.child(j)
+            if c.kind == mp.NodeKind.FUNC_DECL and c.ty != None and len(c.ty) > 0
+                extern_names[c.value] = 1
+            elif c.kind == mp.NodeKind.CLASS_DECL and has(info.type_info, c.value)
+                extern_names[c.value] = 1
+            elif (c.kind == mp.NodeKind.VAR_DECL or c.kind == mp.NodeKind.CONST_DECL) and has(info.constants, c.value)
+                extern_names[c.value] = 1
+            end
+            j += 1
+        end
+
+        # Collect local top-level names (not extern, not already mangled)
+        local_names: Dict[str, i64] = Dict[str, i64]()
+        j = 0
+        while j < mod.child_count()
+            c := mod.child(j)
+            nm := c.value
+            if _is_decl_kind(c.kind) and not has(extern_names, nm) and not su.contains(nm, "__")
+                local_names[nm] = 1
+            end
+            j += 1
+        end
+
+        # Build rename map
+        rmap: Dict[str, str] = Dict[str, str]()
+        k := keys(local_names)
+        j = 0
+        while j < len(k)
+            rmap[k[j]] = string.concat(string.concat(alias, "__"), k[j])
+            j += 1
+        end
+
+        # Rename declaration names
+        j = 0
+        while j < mod.child_count()
+            c := mod.child(j)
+            if has(rmap, c.value)
+                c.value = rmap[c.value]
+            end
+            j += 1
+        end
+
+        # Rename all references within the module
+        _walk_rename(mod, rmap)
+
+        # Collect module's children for merging (skip IMPORT/EXTERN nodes)
+        j = 0
+        while j < mod.child_count()
+            c := mod.child(j)
+            if c.kind != mp.NodeKind.IMPORT and c.kind != mp.NodeKind.EXTERN
+                append(merged, c)
+            end
+            j += 1
+        end
+
+        aliases[alias] = 1
+        ii += 1
+    end
+
+    # Rebuild children: merged modules first, then original (sans IMPORT nodes)
+    if len(merged) > 0 or len(aliases) > 0
+        new_children: List[pars.Node] = List[pars.Node]()
+
+        # Deduplicate: track names already added
+        added: Dict[str, i64] = Dict[str, i64]()
+
+        # Merged declarations
+        j: i64 = 0
+        while j < len(merged)
+            c := merged[j]
+            nm := c.value
+            if _is_decl_kind(c.kind)
+                if has(added, nm)
+                    j += 1
+                    continue
+                end
+                added[nm] = 1
+            end
+            append(new_children, c)
+            j += 1
+        end
+
+        # Original children, skipping IMPORT nodes
+        j = 0
+        while j < prog.child_count()
+            c := prog.child(j)
+            if c.kind != mp.NodeKind.IMPORT
+                nm := c.value
+                if _is_decl_kind(c.kind) and has(added, nm)
+                    j += 1
+                    continue
+                end
+                added[nm] = 1
+                append(new_children, c)
+            end
+            j += 1
+        end
+        prog.children = new_children
+    end
+
+    # Rewrite dotted references in main program
+    if len(aliases) > 0
+        _walk_resolve(prog, aliases)
+    end
+end
+
+def _is_decl_kind(k: i64) -> bool
+    return k == mp.NodeKind.FUNC_DECL or k == mp.NodeKind.CLASS_DECL or k == mp.NodeKind.STRUCT_DECL or k == mp.NodeKind.INTERFACE_DECL or k == mp.NodeKind.ENUM_DECL or k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL
+end
+
+# ─── Public API ──────────────────────────────────────────────────────
+
+def resolve(prog: pars.Node, src_file: str, compiler_dir: str, s: sink.Sink, defines: List[str]) -> ExternInfo
+    info := ExternInfo()
+    loading: Dict[str, i64] = Dict[str, i64]()
+
+    # Imports first (they may themselves have externs)
+    _resolve_imports(prog, pu.path_dir(src_file), loading, compiler_dir, info, s, defines)
+    if s.has_errors()
+        return info
+    end
+
+    # Then resolve the main file's own externs
+    _resolve_externs(prog, src_file, compiler_dir, info, s, defines)
+
+    return info
+end

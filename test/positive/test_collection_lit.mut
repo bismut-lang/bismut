@@ -1,0 +1,122 @@
+# Test collection literal syntax: List[T]() {...} and Dict[K, V]() {...}
+
+# ── List literals ──
+
+# Basic list literal
+nums: List[i64] = List[i64]() {10, 20, 30}
+print(len(nums))
+print(nums[0])
+print(nums[1])
+print(nums[2])
+
+# Empty list literal
+empty: List[i64] = List[i64]() {}
+print(len(empty))
+
+# List with := shorthand
+names := List[str]() {"alice", "bob", "charlie"}
+print(len(names))
+print(names[0])
+print(names[1])
+print(names[2])
+
+# List of floats
+vals := List[f64]() {1.5, 2.5, 3.5}
+print(len(vals))
+print(vals[0])
+
+# List of bools
+flags := List[bool]() {True, False, True}
+print(len(flags))
+
+# ── Dict literals ──
+
+# Basic dict literal
+ages: Dict[str, i64] = Dict[str, i64]() {"alice": 30, "bob": 25, "charlie": 40}
+print(len(ages))
+print(ages["alice"])
+print(ages["bob"])
+print(ages["charlie"])
+
+# Empty dict literal
+empty_d: Dict[str, str] = Dict[str, str]() {}
+print(len(empty_d))
+
+# Dict with := shorthand
+colors := Dict[str, str]() {"sky": "blue", "grass": "green"}
+print(len(colors))
+print(colors["sky"])
+print(colors["grass"])
+
+# ── Trailing comma ──
+xs := List[i64]() {100, 200, 300,}
+print(len(xs))
+print(xs[0])
+
+ds := Dict[str, i64]() {"a": 1, "b": 2,}
+print(len(ds))
+print(ds["a"])
+
+# ── Ref types: classes ──
+
+class Person
+    name: str
+    age: i64
+
+    def init(self, name: str, age: i64)
+        self.name = name
+        self.age = age
+    end
+end
+
+# List of class objects
+people := List[Person]() {Person("Alice", 30), Person("Bob", 25), Person("Charlie", 40)}
+print(len(people))
+print(people[0].name)
+print(people[1].name)
+print(people[2].age)
+
+# Dict of class objects
+db := Dict[str, Person]() {"ceo": Person("Diana", 50), "cto": Person("Eve", 45)}
+print(len(db))
+print(db["ceo"].name)
+print(db["cto"].age)
+
+# ── Nested containers ──
+
+# List of Lists
+matrix := List[List[i64]]() {
+    List[i64]() {1, 2, 3},
+    List[i64]() {4, 5, 6},
+    List[i64]() {7, 8, 9}
+}
+print(len(matrix))
+print(matrix[0][0])
+print(matrix[1][1])
+print(matrix[2][2])
+
+# Dict of Lists
+groups := Dict[str, List[i64]]() {
+    "evens": List[i64]() {2, 4, 6},
+    "odds": List[i64]() {1, 3, 5}
+}
+print(len(groups))
+print(groups["evens"][1])
+print(groups["odds"][2])
+
+# List of Dicts
+records := List[Dict[str, str]]() {
+    Dict[str, str]() {"name": "Alice", "role": "dev"},
+    Dict[str, str]() {"name": "Bob", "role": "ops"}
+}
+print(len(records))
+print(records[0]["name"])
+print(records[1]["role"])
+
+# Dict of Dicts
+config := Dict[str, Dict[str, str]]() {
+    "db": Dict[str, str]() {"host": "localhost", "port": "5432"},
+    "cache": Dict[str, str]() {"host": "redis", "port": "6379"}
+}
+print(config["db"]["host"])
+print(config["cache"]["port"])

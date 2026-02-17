@@ -1,0 +1,2 @@
+# Negative: assign i64 to str variable
+x: str = 42

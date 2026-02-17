@@ -1,0 +1,4 @@
+# ERROR: return tuple with wrong element type
+def get_pair() -> (i64, str)
+    return (42, 100)
+end

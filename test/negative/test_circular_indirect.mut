@@ -1,0 +1,25 @@
+# test_circular_indirect.mut — cycle only through containers: warning
+class Parent
+    children: List[Child]
+
+    def init(self)
+        self.children = List[Child]()
+    end
+end
+
+class Child
+    parents: List[Parent]
+    name: str
+
+    def init(self, name: str)
+        self.name = name
+        self.parents = List[Parent]()
+    end
+end
+
+p := Parent()
+c := Child("kid")
+append(p.children, c)
+append(c.parents, p)
+print(c.name)
+print(len(p.children))

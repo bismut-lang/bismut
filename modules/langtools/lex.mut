@@ -1,0 +1,514 @@
+# lex.mut — Generic lexer toolkit for Bismut
+#
+# Provides reusable building blocks for writing lexers:
+#   - Token class with kind, lexeme, line, col + helper methods
+#   - Lexer class with source tracking, peek/advance, scanning methods
+#
+# Character classification lives in strutils (is_alpha, is_digit, etc.)
+#
+# Usage:  import langtools.lex
+#         import strutils as su
+#         lx := lex.Lexer("<input>", source_code)
+#         tok := lx.read_ident()
+#         if tok.is_eof() ...
+
+extern string
+extern stringbuilder
+import strutils as su
+
+# ─── Token kinds ──────────────────────────────────────────────────────
+
+enum TokenKind
+    EOF, IDENT, INT, FLOAT, STRING, NEWLINE, ERROR, CHAR
+    USER = 100
+end
+
+# ─── Token ────────────────────────────────────────────────────────────
+
+class Token
+    kind: i64
+    lexeme: str
+    line: i64
+    col: i64
+
+    def init(self, kind: i64, lexeme: str, line: i64, col: i64)
+        self.kind = kind
+        self.lexeme = lexeme
+        self.line = line
+        self.col = col
+    end
+
+    def is_kind(self, k: i64) -> bool
+        return self.kind == k
+    end
+
+    def is_eof(self) -> bool
+        return self.kind == TokenKind.EOF
+    end
+
+    def is_error(self) -> bool
+        return self.kind == TokenKind.ERROR
+    end
+
+    def to_str(self) -> str
+        sb := stringbuilder.new()
+        stringbuilder.append_i64(sb, self.kind)
+        stringbuilder.append_str(sb, ":")
+        stringbuilder.append_str(sb, self.lexeme)
+        stringbuilder.append_str(sb, " @ ")
+        stringbuilder.append_i64(sb, self.line)
+        stringbuilder.append_str(sb, ":")
+        stringbuilder.append_i64(sb, self.col)
+        return stringbuilder.build(sb)
+    end
+
+    def classify(self, keywords: Dict[str, i64]) -> Token
+        # If lexeme is a keyword, return new token with that kind.
+        # Otherwise return self unchanged.
+        if has(keywords, self.lexeme)
+            return Token(keywords[self.lexeme], self.lexeme, self.line, self.col)
+        end
+        return self
+    end
+end
+
+# ─── Error formatting (standalone) ────────────────────────────────────
+
+def error_at(file: str, line: i64, col: i64, msg: str) -> str
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, file)
+    stringbuilder.append_str(sb, ":")
+    stringbuilder.append_i64(sb, line)
+    stringbuilder.append_str(sb, ":")
+    stringbuilder.append_i64(sb, col)
+    stringbuilder.append_str(sb, ": error: ")
+    stringbuilder.append_str(sb, msg)
+    return stringbuilder.build(sb)
+end
+
+# ─── Save / restore position ─────────────────────────────────────────
+
+struct LexerPos
+    pos: i64
+    line: i64
+    col: i64
+end
+
+# ─── Lexer ────────────────────────────────────────────────────────────
+
+class Lexer
+    file: str
+    src: str
+    length: i64
+    pos: i64
+    line: i64
+    col: i64
+    normalize_int: bool
+
+    def init(self, file: str, src: str)
+        self.file = file
+        self.src = src
+        self.length = len(src)
+        self.pos = 0
+        self.line = 1
+        self.col = 1
+        self.normalize_int = False
+    end
+
+    # ── Core operations ───────────────────────────────────────────
+
+    def eof(self) -> bool
+        return self.pos >= self.length
+    end
+
+    def peek(self) -> i64
+        if self.pos >= self.length
+            return 0
+        end
+        return self.src[self.pos]
+    end
+
+    def peek_at(self, offset: i64) -> i64
+        idx := self.pos + offset
+        if idx >= self.length
+            return 0
+        end
+        return self.src[idx]
+    end
+
+    def advance(self) -> i64
+        if self.pos >= self.length
+            return 0
+        end
+        c := self.src[self.pos]
+        self.pos += 1
+        if c == '\n'
+            self.line += 1
+            self.col = 1
+        else
+            self.col += 1
+        end
+        return c
+    end
+
+    def advance_n(self, n: i64)
+        i: i64 = 0
+        while i < n
+            self.advance()
+            i += 1
+        end
+    end
+
+    def remaining(self) -> i64
+        return self.length - self.pos
+    end
+
+    # ── Matching / lookahead ──────────────────────────────────────
+
+    def match_char(self, expected: i64) -> bool
+        if self.pos < self.length and self.src[self.pos] == expected
+            self.advance()
+            return True
+        end
+        return False
+    end
+
+    def match_str(self, expected: str) -> bool
+        slen := len(expected)
+        if self.pos + slen > self.length
+            return False
+        end
+        i: i64 = 0
+        while i < slen
+            if self.src[self.pos + i] != expected[i]
+                return False
+            end
+            i += 1
+        end
+        self.advance_n(slen)
+        return True
+    end
+
+    def starts_with(self, expected: str) -> bool
+        slen := len(expected)
+        if self.pos + slen > self.length
+            return False
+        end
+        i: i64 = 0
+        while i < slen
+            if self.src[self.pos + i] != expected[i]
+                return False
+            end
+            i += 1
+        end
+        return True
+    end
+
+    # ── Extraction ────────────────────────────────────────────────
+
+    def slice(self, start: i64, end_pos: i64) -> str
+        return string.substr(self.src, start, end_pos - start)
+    end
+
+    def slice_from(self, start: i64) -> str
+        return string.substr(self.src, start, self.pos - start)
+    end
+
+    # ── Skip utilities ────────────────────────────────────────────
+
+    def skip_whitespace(self)
+        while not self.eof() and su.is_whitespace(self.peek())
+            self.advance()
+        end
+    end
+
+    def skip_whitespace_and_newlines(self)
+        while not self.eof()
+            c := self.peek()
+            if su.is_whitespace(c) or su.is_newline(c)
+                self.advance()
+            else
+                break
+            end
+        end
+    end
+
+    def skip_line(self)
+        while not self.eof() and self.peek() != '\n'
+            self.advance()
+        end
+    end
+
+    def skip_line_comment(self, marker: str) -> bool
+        if self.starts_with(marker)
+            self.skip_line()
+            return True
+        end
+        return False
+    end
+
+    def skip_block_comment(self, open: str, close: str, nested: bool) -> bool
+        if not self.starts_with(open)
+            return False
+        end
+        olen := len(open)
+        clen := len(close)
+        self.advance_n(olen)
+        depth: i64 = 1
+        while not self.eof() and depth > 0
+            if nested and self.starts_with(open)
+                self.advance_n(olen)
+                depth += 1
+            elif self.starts_with(close)
+                self.advance_n(clen)
+                depth -= 1
+            else
+                self.advance()
+            end
+        end
+        return True
+    end
+
+    # ── Token readers ─────────────────────────────────────────────
+
+    def read_while(self, predicate: Fn(i64) -> bool) -> str
+        start := self.pos
+        while not self.eof() and predicate(self.peek())
+            self.advance()
+        end
+        return self.slice(start, self.pos)
+    end
+
+    def read_ident(self) -> Token
+        ln := self.line
+        cl := self.col
+        start := self.pos
+        self.advance()
+        while not self.eof() and su.is_ident_part(self.peek())
+            self.advance()
+        end
+        return Token(TokenKind.IDENT, self.slice(start, self.pos), ln, cl)
+    end
+
+    def read_integer(self) -> Token
+        ln := self.line
+        cl := self.col
+        start := self.pos
+        while not self.eof() and su.is_digit(self.peek())
+            self.advance()
+        end
+        return Token(TokenKind.INT, self.slice(start, self.pos), ln, cl)
+    end
+
+    def read_number(self) -> Token
+        ln := self.line
+        cl := self.col
+        start := self.pos
+
+        # Hex: 0x...
+        if self.peek() == '0' and (self.peek_at(1) == 'x' or self.peek_at(1) == 'X')
+            self.advance()
+            self.advance()
+            if self.eof() or not su.is_hex_digit(self.peek())
+                return Token(TokenKind.ERROR, "expected hex digit after '0x'", ln, cl)
+            end
+            while not self.eof() and (su.is_hex_digit(self.peek()) or self.peek() == '_')
+                self.advance()
+            end
+            return self._make_int_token(self.slice(start, self.pos), ln, cl)
+        end
+
+        # Binary: 0b...
+        if self.peek() == '0' and (self.peek_at(1) == 'b' or self.peek_at(1) == 'B')
+            self.advance()
+            self.advance()
+            if self.eof() or (self.peek() != '0' and self.peek() != '1')
+                return Token(TokenKind.ERROR, "expected binary digit after '0b'", ln, cl)
+            end
+            while not self.eof() and (self.peek() == '0' or self.peek() == '1' or self.peek() == '_')
+                self.advance()
+            end
+            return self._make_int_token(self.slice(start, self.pos), ln, cl)
+        end
+
+        # Octal: 0o...
+        if self.peek() == '0' and (self.peek_at(1) == 'o' or self.peek_at(1) == 'O')
+            self.advance()
+            self.advance()
+            if self.eof() or self.peek() < '0' or self.peek() > '7'
+                return Token(TokenKind.ERROR, "expected octal digit after '0o'", ln, cl)
+            end
+            while not self.eof() and ((self.peek() >= '0' and self.peek() <= '7') or self.peek() == '_')
+                self.advance()
+            end
+            return self._make_int_token(self.slice(start, self.pos), ln, cl)
+        end
+
+        # Decimal digits
+        while not self.eof() and (su.is_digit(self.peek()) or self.peek() == '_')
+            self.advance()
+        end
+
+        # Float: decimal point followed by digit
+        if not self.eof() and self.peek() == '.' and su.is_digit(self.peek_at(1))
+            self.advance()
+            while not self.eof() and (su.is_digit(self.peek()) or self.peek() == '_')
+                self.advance()
+            end
+            # Exponent: e/E
+            if not self.eof() and (self.peek() == 'e' or self.peek() == 'E')
+                self.advance()
+                if not self.eof() and (self.peek() == '+' or self.peek() == '-')
+                    self.advance()
+                end
+                if self.eof() or not su.is_digit(self.peek())
+                    return Token(TokenKind.ERROR, "malformed float exponent", ln, cl)
+                end
+                while not self.eof() and (su.is_digit(self.peek()) or self.peek() == '_')
+                    self.advance()
+                end
+            end
+            return Token(TokenKind.FLOAT, self.slice(start, self.pos), ln, cl)
+        end
+
+        return Token(TokenKind.INT, self.slice(start, self.pos), ln, cl)
+    end
+
+    def _make_int_token(self, raw: str, ln: i64, cl: i64) -> Token
+        if self.normalize_int
+            val := string.str_to_i64(raw)
+            return Token(TokenKind.INT, string.i64_to_str(val), ln, cl)
+        end
+        return Token(TokenKind.INT, raw, ln, cl)
+    end
+
+    def read_string(self, quote: i64) -> Token
+        ln := self.line
+        cl := self.col
+        start := self.pos
+        self.advance()
+
+        while not self.eof()
+            c := self.peek()
+            if c == quote
+                self.advance()
+                return Token(TokenKind.STRING, self.slice(start, self.pos), ln, cl)
+            end
+            if c == '\n'
+                return Token(TokenKind.ERROR, "newline in string literal", ln, cl)
+            end
+            if c == '\\'
+                self.advance()
+                if self.eof()
+                    return Token(TokenKind.ERROR, "unterminated escape in string", ln, cl)
+                end
+                self.advance()
+            else
+                self.advance()
+            end
+        end
+        return Token(TokenKind.ERROR, "unterminated string literal", ln, cl)
+    end
+
+    def read_triple_string(self, quote: i64) -> Token
+        ln := self.line
+        cl := self.col
+        start := self.pos
+        self.advance()
+        self.advance()
+        self.advance()
+
+        while not self.eof()
+            c := self.peek()
+            if c == quote and self.peek_at(1) == quote and self.peek_at(2) == quote
+                self.advance()
+                self.advance()
+                self.advance()
+                return Token(TokenKind.STRING, self.slice(start, self.pos), ln, cl)
+            end
+            if c == '\\'
+                self.advance()
+                if not self.eof()
+                    self.advance()
+                end
+            else
+                self.advance()
+            end
+        end
+        return Token(TokenKind.ERROR, "unterminated triple-quoted string", ln, cl)
+    end
+
+    def read_raw_string(self, quote: i64) -> Token
+        ln := self.line
+        cl := self.col
+        start := self.pos
+        self.advance()
+        while not self.eof()
+            c := self.peek()
+            if c == quote
+                self.advance()
+                return Token(TokenKind.STRING, self.slice(start, self.pos), ln, cl)
+            end
+            if c == '\n'
+                return Token(TokenKind.ERROR, "newline in raw string literal", ln, cl)
+            end
+            self.advance()
+        end
+        return Token(TokenKind.ERROR, "unterminated raw string literal", ln, cl)
+    end
+
+    def read_multiline_string(self, quote: i64) -> Token
+        ln := self.line
+        cl := self.col
+        start := self.pos
+        self.advance()
+        while not self.eof()
+            c := self.peek()
+            if c == quote
+                self.advance()
+                return Token(TokenKind.STRING, self.slice(start, self.pos), ln, cl)
+            end
+            if c == '\\'
+                self.advance()
+                if self.eof()
+                    return Token(TokenKind.ERROR, "unterminated escape in string", ln, cl)
+                end
+                self.advance()
+            else
+                self.advance()
+            end
+        end
+        return Token(TokenKind.ERROR, "unterminated string literal", ln, cl)
+    end
+
+    def try_match_operators(self, ops: List[str], base_kind: i64) -> Token
+        ln := self.line
+        cl := self.col
+        i: i64 = 0
+        while i < len(ops)
+            if self.match_str(ops[i])
+                return Token(base_kind + i, ops[i], ln, cl)
+            end
+            i += 1
+        end
+        return Token(TokenKind.ERROR, "unexpected character", ln, cl)
+    end
+
+    # ── Error formatting ──────────────────────────────────────────
+
+    def error_msg(self, msg: str) -> str
+        return error_at(self.file, self.line, self.col, msg)
+    end
+
+    # ── Save / restore ────────────────────────────────────────────
+
+    def save_pos(self) -> LexerPos
+        return LexerPos(self.pos, self.line, self.col)
+    end
+
+    def restore_pos(self, saved: LexerPos)
+        self.pos = saved.pos
+        self.line = saved.line
+        self.col = saved.col
+    end
+end

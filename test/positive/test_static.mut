@@ -1,0 +1,32 @@
+# Test static variables in functions
+
+def counter() -> i64
+    static n: i64 = 0
+    n += 1
+    return n
+end
+
+# Call counter multiple times — should persist
+print(counter())
+print(counter())
+print(counter())
+
+# --- static with different type ---
+def greet() -> str
+    static prefix: str = "hello"
+    return prefix
+end
+print(greet())
+print(greet())
+
+# --- multiple static vars in same function ---
+def accum(x: i64) -> i64
+    static total: i64 = 0
+    static calls: i64 = 0
+    total += x
+    calls += 1
+    return total
+end
+print(accum(10))
+print(accum(20))
+print(accum(5))

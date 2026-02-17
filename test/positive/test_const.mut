@@ -1,0 +1,25 @@
+# Test const declarations
+
+# --- basic const ---
+const MAX: i64 = 100
+print(MAX)
+
+# --- const str ---
+const GREETING: str = "hello"
+print(GREETING)
+
+# --- const in expression ---
+const WIDTH: i64 = 10
+const HEIGHT: i64 = 20
+area: i64 = WIDTH * HEIGHT
+print(area)
+
+# --- const bool ---
+const DEBUG: bool = True
+if DEBUG
+    print(1)
+end
+
+# --- const f64 ---
+const PI: f64 = 3.14159
+print(PI)

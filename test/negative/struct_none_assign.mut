@@ -1,0 +1,7 @@
+# ERROR: cannot assign None to a struct (value types are not nullable)
+struct Point
+    x: i64
+    y: i64
+end
+
+p: Point = None

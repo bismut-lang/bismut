@@ -1,0 +1,44 @@
+# Shared shapes module for import tests
+
+interface IShape
+    def area(self) -> f64
+    def name(self) -> str
+end
+
+class Circle : IShape
+    r: f64
+
+    def init(self, r: f64)
+        self.r = r
+    end
+
+    def area(self) -> f64
+        return self.r * self.r * 3.14159
+    end
+
+    def name(self) -> str
+        return "Circle"
+    end
+end
+
+class Rect : IShape
+    w: f64
+    h: f64
+
+    def init(self, w: f64, h: f64)
+        self.w = w
+        self.h = h
+    end
+
+    def area(self) -> f64
+        return self.w * self.h
+    end
+
+    def name(self) -> str
+        return "Rect"
+    end
+end
+
+def describe(s: IShape) -> str
+    return s.name()
+end

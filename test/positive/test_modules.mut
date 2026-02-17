@@ -1,0 +1,13 @@
+# Test importing from modules/ folder (not local to this file)
+import mathutils
+
+print(mathutils.square(5))       # expect: 25
+print(mathutils.cube(3))         # expect: 27
+print(mathutils.max(10, 20))     # expect: 20
+print(mathutils.min(10, 20))     # expect: 10
+
+# EXPECTED:
+# 25
+# 27
+# 20
+# 10

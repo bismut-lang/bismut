@@ -1,0 +1,2 @@
+# Negative: invalid hex literal (no digits after 0x)
+x: i64 = 0xZZ

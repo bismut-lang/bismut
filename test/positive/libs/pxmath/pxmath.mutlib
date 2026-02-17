@@ -1,0 +1,17 @@
+# pxmath — example Bismut extern library
+# Provides basic math functions implemented in C.
+
+[flags]
+ldflags = -lm
+
+[functions]
+sqrt(x: f64) -> f64 = pxmath_sqrt
+abs_i64(x: i64) -> i64 = pxmath_abs_i64
+abs_f64(x: f64) -> f64 = pxmath_abs_f64
+pow(base: f64, exp: f64) -> f64 = pxmath_pow
+min_i64(a: i64, b: i64) -> i64 = pxmath_min_i64
+max_i64(a: i64, b: i64) -> i64 = pxmath_max_i64
+clamp(val: i64, lo: i64, hi: i64) -> i64 = pxmath_clamp
+
+[constants]
+PI: f64 = 3.14159265358979323846

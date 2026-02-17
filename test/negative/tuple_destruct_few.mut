@@ -1,0 +1,6 @@
+# ERROR: destructure with too few names
+def get_triple() -> (i64, str, bool)
+    return (1, "a", True)
+end
+
+a, b := get_triple()

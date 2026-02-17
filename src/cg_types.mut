@@ -1,0 +1,413 @@
+# cg_types.mut -- Type utilities for C code generation
+#
+# Pure functions: type predicates, C type mapping, string escaping, AST accessors.
+# Also holds mutable type registries (class/struct/iface/enum name sets).
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import parser as mp
+import strutils as su
+import type_utils as tu
+
+# ─── Type registry globals (populated by codegen before emission) ────
+
+_class_names: Dict[str, i64] = Dict[str, i64]()
+_struct_names: Dict[str, i64] = Dict[str, i64]()
+_iface_names: Dict[str, i64] = Dict[str, i64]()
+_enum_names: Dict[str, i64] = Dict[str, i64]()
+
+def register_class(name: str)
+    _class_names[name] = 1
+end
+
+def register_struct(name: str)
+    _struct_names[name] = 1
+end
+
+def register_iface(name: str)
+    _iface_names[name] = 1
+end
+
+def register_enum(name: str)
+    _enum_names[name] = 1
+end
+
+def clear_registries()
+    _class_names = Dict[str, i64]()
+    _struct_names = Dict[str, i64]()
+    _iface_names = Dict[str, i64]()
+    _enum_names = Dict[str, i64]()
+end
+
+def is_class(name: str) -> bool
+    return has(_class_names, name)
+end
+
+def is_struct(name: str) -> bool
+    return has(_struct_names, name)
+end
+
+def is_iface(name: str) -> bool
+    return has(_iface_names, name)
+end
+
+def is_enum(name: str) -> bool
+    return has(_enum_names, name)
+end
+
+# ─── Primitive C type mapping ────────────────────────────────────────
+
+_PRIM_C: Dict[str, str] = Dict[str, str]() {"i8": "int8_t", "i16": "int16_t", "i32": "int32_t", "i64": "int64_t", "u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t", "u64": "uint64_t", "f32": "float", "f64": "double", "bool": "bool", "str": "__lang_rt_Str*", "void": "void"}
+
+def is_prim_c(name: str) -> bool
+    return has(_PRIM_C, name)
+end
+
+def prim_c(name: str) -> str
+    return _PRIM_C[name]
+end
+
+# ─── Tag and C type mapping ──────────────────────────────────────────
+
+def elem_tag(elem_ty: str) -> str
+    # i64 -> I64, str -> STR, Person -> Person, List[i64] -> List_I64
+    if tu.has_prim_tag(elem_ty)
+        return tu.prim_tag(elem_ty)
+    end
+    if tu.is_list_type(elem_ty)
+        return string.concat("List_", elem_tag(tu.list_elem_type(elem_ty)))
+    end
+    if tu.is_dict_type(elem_ty)
+        kt := elem_tag(tu.dict_key_type(elem_ty))
+        vt := elem_tag(tu.dict_val_type(elem_ty))
+        return format("Dict_{}_{}", kt, vt)
+    end
+    if tu.is_fn_type(elem_ty)
+        return fn_typedef_name(elem_ty)
+    end
+    if tu.is_tuple_type(elem_ty)
+        elems := tu.tuple_elem_types(elem_ty)
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, "Tuple_")
+        i: i64 = 0
+        while i < len(elems)
+            if i > 0
+                stringbuilder.append_str(sb, "_")
+            end
+            stringbuilder.append_str(sb, elem_tag(elems[i]))
+            i += 1
+        end
+        return stringbuilder.build(sb)
+    end
+    return elem_ty
+end
+
+def dict_combined_tag(ty: str) -> str
+    kt := elem_tag(tu.dict_key_type(ty))
+    vt := elem_tag(tu.dict_val_type(ty))
+    return format("{}_{}", kt, vt)
+end
+
+def dict_combined_tag_from_inner(inner: str) -> str
+    parts := tu.split_type_list(inner)
+    kt := elem_tag(parts[0])
+    vt := elem_tag(parts[1])
+    return format("{}_{}", kt, vt)
+end
+
+def split_dict_tag(combined: str) -> (str, str)
+    i: i64 = 0
+    while i < len(combined)
+        if combined[i] == '_'
+            return (string.substr(combined, 0, i), string.substr(combined, i + 1, len(combined) - i - 1))
+        end
+        i += 1
+    end
+    return (combined, "")
+end
+
+def fn_typedef_name(ty: str) -> str
+    # Fn(i64,str)->bool -> __lang_rt_Fn_I64_STR__BOOL
+    params := tu.fn_param_types(ty)
+    ret := tu.fn_ret_type(ty)
+    ret_tag := "VOID"
+    if ret != "void"
+        ret_tag = elem_tag(ret)
+    end
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "__lang_rt_Fn_")
+    if len(params) == 0
+        stringbuilder.append_str(sb, "VOID")
+    else
+        i: i64 = 0
+        while i < len(params)
+            if i > 0
+                stringbuilder.append_str(sb, "_")
+            end
+            stringbuilder.append_str(sb, elem_tag(params[i]))
+            i += 1
+        end
+    end
+    stringbuilder.append_str(sb, "__")
+    stringbuilder.append_str(sb, ret_tag)
+    return stringbuilder.build(sb)
+end
+
+def tuple_struct_name(ty: str) -> str
+    elems := tu.tuple_elem_types(ty)
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "__lang_rt_Tuple_")
+    i: i64 = 0
+    while i < len(elems)
+        if i > 0
+            stringbuilder.append_str(sb, "_")
+        end
+        stringbuilder.append_str(sb, elem_tag(elems[i]))
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end
+
+def elem_c_type(elem_ty: str) -> str
+    if is_prim_c(elem_ty)
+        return prim_c(elem_ty)
+    end
+    if is_struct(elem_ty)
+        return format("__lang_rt_Struct_{}", elem_ty)
+    end
+    if tu.is_list_type(elem_ty)
+        tag := elem_tag(tu.list_elem_type(elem_ty))
+        return format("__lang_rt_List_{}*", tag)
+    end
+    if tu.is_dict_type(elem_ty)
+        combined := dict_combined_tag(elem_ty)
+        return format("__lang_rt_Dict_{}*", combined)
+    end
+    if tu.is_fn_type(elem_ty)
+        return fn_typedef_name(elem_ty)
+    end
+    if tu.is_tuple_type(elem_ty)
+        return tuple_struct_name(elem_ty)
+    end
+    if is_iface(elem_ty)
+        return format("__lang_rt_Iface_{}", elem_ty)
+    end
+    # Assume class
+    return format("__lang_rt_Class_{}*", elem_ty)
+end
+
+def c_type(tname: str) -> str
+    if is_prim_c(tname)
+        return prim_c(tname)
+    end
+    if is_enum(tname)
+        return "int64_t"
+    end
+    if is_struct(tname)
+        return format("__lang_rt_Struct_{}", tname)
+    end
+    if tu.is_list_type(tname)
+        tag := elem_tag(tu.list_elem_type(tname))
+        return format("__lang_rt_List_{}*", tag)
+    end
+    if tu.is_dict_type(tname)
+        combined := dict_combined_tag(tname)
+        return format("__lang_rt_Dict_{}*", combined)
+    end
+    if is_iface(tname)
+        return format("__lang_rt_Iface_{}", tname)
+    end
+    if tu.is_fn_type(tname)
+        return fn_typedef_name(tname)
+    end
+    if tu.is_tuple_type(tname)
+        return tuple_struct_name(tname)
+    end
+    # Assume class (pointer to struct)
+    return format("__lang_rt_Class_{}*", tname)
+end
+
+# ─── Ref type check ──────────────────────────────────────────────────
+
+def is_ref_type(tname: str) -> bool
+    if tname == "str"
+        return True
+    end
+    if is_class(tname)
+        return True
+    end
+    if is_iface(tname)
+        return True
+    end
+    if tu.is_list_type(tname) or tu.is_dict_type(tname)
+        return True
+    end
+    if tu.is_fn_type(tname)
+        return False
+    end
+    if tu.is_tuple_type(tname)
+        elems := tu.tuple_elem_types(tname)
+        i: i64 = 0
+        while i < len(elems)
+            if is_ref_type(elems[i])
+                return True
+            end
+            i += 1
+        end
+        return False
+    end
+    return False
+end
+
+# ─── Identifier mangling ─────────────────────────────────────────────
+
+def ci(name: str) -> str
+    # Append trailing underscore so no Bismut name collides with a C keyword
+    return string.concat(name, "_")
+end
+
+# ─── String escaping ─────────────────────────────────────────────────
+
+def unescape_string(raw: str) -> str
+    # Strip outer quotes and process escape sequences.
+    # Input is the raw lexeme including surrounding quotes.
+    # Returns C-escaped double-quoted string literal.
+    slen := len(raw)
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "\"")
+
+    # Determine quote style and inner content range
+    inner_start: i64 = 0
+    inner_end: i64 = 0
+    if slen >= 6
+        # Check for triple quotes
+        c0 := raw[0]
+        c1 := raw[1]
+        c2 := raw[2]
+        if c0 == c1 and c1 == c2 and (c0 == '"' or c0 == '\'')
+            inner_start = 3
+            inner_end = slen - 3
+        else
+            inner_start = 1
+            inner_end = slen - 1
+        end
+    else
+        inner_start = 1
+        inner_end = slen - 1
+    end
+
+    quote_char := raw[0]
+    i := inner_start
+    while i < inner_end
+        c := raw[i]
+        if c == '\\'
+            # Escape sequence
+            if i + 1 < inner_end
+                esc := raw[i + 1]
+                if esc == 'n'
+                    stringbuilder.append_str(sb, "\\n")
+                elif esc == 't'
+                    stringbuilder.append_str(sb, "\\t")
+                elif esc == 'r'
+                    stringbuilder.append_str(sb, "\\r")
+                elif esc == '\\'
+                    stringbuilder.append_str(sb, "\\\\")
+                elif esc == '"'
+                    stringbuilder.append_str(sb, "\\\"")
+                elif esc == '\''
+                    # \' in Bismut → just ' in C double-quoted context
+                    stringbuilder.append_str(sb, "'")
+                else
+                    # Pass through unknown escapes
+                    stringbuilder.append_str(sb, "\\")
+                    stringbuilder.append_str(sb, string.chr(esc))
+                end
+                i += 2
+            else
+                stringbuilder.append_str(sb, "\\")
+                i += 1
+            end
+        elif c == '"'
+            # Unescaped double quote (from single-quoted Bismut string)
+            stringbuilder.append_str(sb, "\\\"")
+            i += 1
+        else
+            stringbuilder.append_str(sb, string.chr(c))
+            i += 1
+        end
+    end
+
+    stringbuilder.append_str(sb, "\"")
+    return stringbuilder.build(sb)
+end
+
+def unescape_char(raw: str) -> i64
+    # Convert char literal like 'A' or '\n' to its integer value.
+    # Raw includes surrounding single quotes.
+    inner := string.substr(raw, 1, len(raw) - 2)
+    if len(inner) == 1
+        return inner[0]
+    end
+    if len(inner) == 2 and inner[0] == '\\'
+        esc := inner[1]
+        if esc == 'n'
+            return 10
+        end
+        if esc == 't'
+            return 9
+        end
+        if esc == '\\'
+            return 92
+        end
+        if esc == '\''
+            return 39
+        end
+        if esc == '"'
+            return 34
+        end
+        if esc == '0'
+            return 0
+        end
+        if esc == 'r'
+            return 13
+        end
+    end
+    return 0
+end
+
+# ─── Source location ──────────────────────────────────────────────────
+
+def src_str(file: str, line: i64, col: i64) -> str
+    # Build __LANG_RT_SRC(...) macro invocation
+    file_c := unescape_file(file)
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "__LANG_RT_SRC(\"")
+    stringbuilder.append_str(sb, file_c)
+    stringbuilder.append_str(sb, "\", ")
+    stringbuilder.append_i64(sb, line)
+    stringbuilder.append_str(sb, ", ")
+    stringbuilder.append_i64(sb, col)
+    stringbuilder.append_str(sb, ")")
+    return stringbuilder.build(sb)
+end
+
+def unescape_file(file: str) -> str
+    # C-escape a file path string (escape backslashes and quotes)
+    sb := stringbuilder.new()
+    i: i64 = 0
+    while i < len(file)
+        c := file[i]
+        if c == '\\'
+            stringbuilder.append_str(sb, "\\\\")
+        elif c == '"'
+            stringbuilder.append_str(sb, "\\\"")
+        else
+            stringbuilder.append_str(sb, string.chr(c))
+        end
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end
+

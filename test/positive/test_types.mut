@@ -1,0 +1,78 @@
+# Test new numeric types: i8, i16, i32, f32
+
+# Literal adaptation: declared type -> literal takes that type
+a: i8 = 42
+b: i16 = 1000
+c: i32 = 100000
+d: i64 = 999999
+
+print(a)
+print(b)
+print(c)
+print(d)
+
+# Float types
+e: f32 = 3.14
+f: f64 = 2.718
+
+print(e)
+print(f)
+
+# := shorthand still defaults to i64 / f64
+g := 7
+h := 1.5
+print(g)
+print(h)
+
+# Negative literals
+i: i8 = -5
+print(i)
+
+# Arithmetic (same type only)
+x: i32 = 10
+y: i32 = 20
+z: i32 = x + y
+print(z)
+
+p: f32 = 1.5
+q: f32 = 2.5
+r: f32 = p + q
+print(r)
+
+# Comparison
+if x < y
+    print(1)
+end
+
+# Explicit casts
+w: i8 = 100
+wide: i64 = i64(w)
+print(wide)
+
+narrow: i8 = i8(wide)
+print(narrow)
+
+# Float <-> int casts
+fi: i64 = i64(f)
+print(fi)
+
+ff: f32 = f32(d)
+print(ff)
+
+# Cast between float sizes
+big: f64 = f64(p)
+print(big)
+
+small: f32 = f32(big)
+print(small)
+
+# Compound assignment
+x += 5
+print(x)
+
+# Function with new types
+def add_i32(a: i32, b: i32) -> i32
+    return a + b
+end
+
+print(add_i32(3, 7))

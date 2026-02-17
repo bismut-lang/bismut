@@ -1,0 +1,108 @@
+# sink.mut — Diagnostic message sink
+#
+# Collects compiler errors, warnings, and notes with source locations.
+# Pass a single Sink instance through all compiler phases; check has_errors()
+# between phases to decide whether to continue.
+#
+# Usage:
+#   import langtools.sink
+#   s := sink.Sink()
+#   s.error("file.mut", 12, 5, 3, "unknown variable 'foo'")
+#   s.warn("file.mut", 20, 1, 0, "unused variable 'x'")
+#   if s.has_errors()
+#       # render and abort
+#   end
+
+# ─── Severity levels ─────────────────────────────────────────────────
+
+enum Severity
+    ERROR, WARNING, NOTE
+end
+
+# ─── Single diagnostic message ───────────────────────────────────────
+
+class Message
+    severity: i64
+    file: str
+    line: i64
+    col: i64
+    span: i64
+    msg: str
+
+    def init(self, severity: i64, file: str, line: i64, col: i64, span: i64, msg: str)
+        self.severity = severity
+        self.file = file
+        self.line = line
+        self.col = col
+        self.span = span
+        self.msg = msg
+    end
+
+    def is_error(self) -> bool
+        return self.severity == Severity.ERROR
+    end
+
+    def is_warning(self) -> bool
+        return self.severity == Severity.WARNING
+    end
+
+    def is_note(self) -> bool
+        return self.severity == Severity.NOTE
+    end
+end
+
+# ─── Diagnostic sink ─────────────────────────────────────────────────
+
+class Sink
+    messages: List[Message]
+    error_count: i64
+    warning_count: i64
+
+    def init(self)
+        self.messages = List[Message]()
+        self.error_count = 0
+        self.warning_count = 0
+    end
+
+    # ── Add diagnostics ───────────────────────────────────────────
+
+    def error(self, file: str, line: i64, col: i64, span: i64, msg: str)
+        append(self.messages, Message(Severity.ERROR, file, line, col, span, msg))
+        self.error_count += 1
+    end
+
+    def warn(self, file: str, line: i64, col: i64, span: i64, msg: str)
+        append(self.messages, Message(Severity.WARNING, file, line, col, span, msg))
+        self.warning_count += 1
+    end
+
+    def note(self, file: str, line: i64, col: i64, span: i64, msg: str)
+        append(self.messages, Message(Severity.NOTE, file, line, col, span, msg))
+    end
+
+    # ── Query ─────────────────────────────────────────────────────
+
+    def has_errors(self) -> bool
+        return self.error_count > 0
+    end
+
+    def has_warnings(self) -> bool
+        return self.warning_count > 0
+    end
+
+    def count(self) -> i64
+        return len(self.messages)
+    end
+
+    def get(self, i: i64) -> Message
+        return self.messages[i]
+    end
+
+    # ── Reset ─────────────────────────────────────────────────────
+
+    def clear(self)
+        self.messages = List[Message]()
+        self.error_count = 0
+        self.warning_count = 0
+    end
+end

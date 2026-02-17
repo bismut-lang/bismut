@@ -1,0 +1,7 @@
+# Negative: call function with wrong number of arguments
+
+def add(a: i64, b: i64) -> i64
+    return a + b
+end
+
+x := add(1, 2, 3)

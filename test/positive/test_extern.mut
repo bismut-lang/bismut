@@ -1,0 +1,34 @@
+extern pxmath
+extern pxmath as m
+
+# Test sqrt
+x: f64 = m.sqrt(25.0)
+print(x)
+
+# Test abs
+a: i64 = pxmath.abs_i64(-42)
+print(a)
+
+b: f64 = pxmath.abs_f64(-3.14)
+print(b)
+
+# Test pow
+c: f64 = m.pow(2.0, 10.0)
+print(c)
+
+# Test min/max
+d: i64 = pxmath.min_i64(5, 3)
+print(d)
+
+e: i64 = pxmath.max_i64(5, 3)
+print(e)
+
+# Test clamp
+f: i64 = m.clamp(15, 0, 10)
+print(f)
+
+g: i64 = m.clamp(-5, 0, 10)
+print(g)
+
+h: i64 = m.clamp(5, 0, 10)
+print(h)

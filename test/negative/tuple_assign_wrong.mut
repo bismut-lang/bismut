@@ -1,0 +1,2 @@
+# ERROR: assign non-tuple to tuple-typed variable
+t: (i64, str) = 42

@@ -1,0 +1,98 @@
+# Test: temporary variables created in if/elif conditions are scoped correctly.
+# Regression test for codegen bug where _pending_releases temps from method calls
+# in and conditions were declared inside a nested C scope but released outside it.
+
+class Box
+    val: i64
+
+    def init(self, val: i64)
+        self.val = val
+    end
+
+    def get_val(self) -> i64
+        return self.val
+    end
+
+    def label(self) -> str
+        return "box"
+    end
+end
+
+class Pair
+    a: Box
+    b: Box
+
+    def init(self, a: Box, b: Box)
+        self.a = a
+        self.b = b
+    end
+
+    def first(self) -> Box
+        return self.a
+    end
+
+    def second(self) -> Box
+        return self.b
+    end
+end
+
+# Test 1: method call chain in if condition with &&
+p := Pair(Box(10), Box(20))
+if p.first().get_val() == 10 and p.second().get_val() == 20
+    print("PASS 1")
+else
+    print("FAIL 1")
+end
+
+# Test 2: method call chain in elif condition with &&
+x := 5
+if x == 99
+    print("FAIL 2")
+elif p.first().get_val() == 10 and p.second().label() == "box"
+    print("PASS 2")
+else
+    print("FAIL 2")
+end
+
+# Test 3: multiple elif branches with method chains
+if x == 1
+    print("FAIL 3")
+elif p.first().get_val() == 99
+    print("FAIL 3")
+elif p.second().get_val() == 20 and p.first().label() == "box"
+    print("PASS 3")
+else
+    print("FAIL 3")
+end
+
+# Test 4: nested if with method chains in both levels
+if p.first().get_val() > 0
+    if p.first().get_val() == 10 and p.second().get_val() == 20
+        print("PASS 4")
+    else
+        print("FAIL 4")
+    end
+else
+    print("FAIL 4")
+end
+
+# Test 5: three-way and with method calls
+if p.first().get_val() == 10 and p.second().get_val() == 20 and p.first().label() == "box"
+    print("PASS 5")
+else
+    print("FAIL 5")
+end
+
+# Test 6: method chain returning string in condition
+if p.first().label() == "box" and p.second().label() == "box"
+    print("PASS 6")
+else
+    print("FAIL 6")
+end
+
+# expect:PASS 1
+# expect:PASS 2
+# expect:PASS 3
+# expect:PASS 4
+# expect:PASS 5
+# expect:PASS 6

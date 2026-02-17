@@ -1,0 +1,136 @@
+# Test the 'is' operator for runtime type checking
+
+# --- Primitives (compile-time, always true/false) ---
+x: i64 = 42
+if x is i64
+    print("x is i64: True")
+else
+    print("x is i64: False")
+end
+
+if x is f64
+    print("x is f64: True")
+else
+    print("x is f64: False")
+end
+
+flag: bool = True
+if flag is bool
+    print("flag is bool: True")
+else
+    print("flag is bool: False")
+end
+
+msg: str = "hello"
+if msg is str
+    print("msg is str: True")
+else
+    print("msg is str: False")
+end
+
+# --- Enums ---
+enum Color
+    RED, GREEN, BLUE
+end
+
+c: Color = Color.RED
+if c is Color
+    print("c is Color: True")
+else
+    print("c is Color: False")
+end
+
+# --- Classes ---
+class Point
+    x: i64
+    y: i64
+    def init(self, x: i64, y: i64)
+        self.x = x
+        self.y = y
+    end
+end
+
+class Circle
+    r: f64
+    def init(self, r: f64)
+        self.r = r
+    end
+end
+
+p := Point(1, 2)
+if p is Point
+    print("p is Point: True")
+else
+    print("p is Point: False")
+end
+
+# --- Interfaces (runtime vtable check) ---
+interface IShape
+    def area(self) -> f64
+end
+
+class Rect : IShape
+    w: f64
+    h: f64
+    def init(self, w: f64, h: f64)
+        self.w = w
+        self.h = h
+    end
+    def area(self) -> f64
+        return self.w * self.h
+    end
+end
+
+class Tri : IShape
+    b: f64
+    h: f64
+    def init(self, b: f64, h: f64)
+        self.b = b
+        self.h = h
+    end
+    def area(self) -> f64
+        return self.b * self.h * 0.5
+    end
+end
+
+s: IShape = Rect(3.0, 4.0)
+if s is Rect
+    print("s is Rect: True")
+else
+    print("s is Rect: False")
+end
+
+if s is Tri
+    print("s is Tri: True")
+else
+    print("s is Tri: False")
+end
+
+# Switch to Tri
+s = Tri(6.0, 2.0)
+if s is Tri
+    print("s is Tri now: True")
+else
+    print("s is Tri now: False")
+end
+
+if s is Rect
+    print("s is Rect now: True")
+else
+    print("s is Rect now: False")
+end
+
+# --- None check ---
+s2: IShape = None
+if s2 is None
+    print("s2 is None: True")
+else
+    print("s2 is None: False")
+end
+
+s2 = Rect(1.0, 1.0)
+if s2 is None
+    print("s2 is None after assign: True")
+else
+    print("s2 is None after assign: False")
+end

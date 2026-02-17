@@ -1,0 +1,274 @@
+# test_analyzer.mut — Tests for analyzer symbol extraction
+#
+# Tests that the analyzer collects all declaration kinds with correct
+# file, line, col, kind, parent, and doc information.
+
+extern string
+extern stringbuilder
+extern filesystem
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+import import_resolver as ir
+import analyzer as az
+
+# ─── Test 1: top-level declarations ─────────────────────────────────
+
+print("--- test 1: top-level declarations ---")
+
+src1 := "# Adds two numbers\ndef add(a: i64, b: i64) -> i64\n    return a + b\nend\n\nclass Point\n    x: i64\n    y: i64\n\n    def init(self, x: i64, y: i64)\n        self.x = x\n        self.y = y\n    end\n\n    def sum(self) -> i64\n        return self.x + self.y\n    end\nend\n\nstruct Vec2\n    x: f64\n    y: f64\nend\n\ninterface IShape\n    def area(self) -> f64\nend\n\nenum Color\n    RED, GREEN, BLUE\nend\n\nconst MAX: i64 = 100\nx: i64 = 42\n"
+
+filesystem.write("/tmp/_test_az1.mut", src1)
+r1 := az.analyze("/tmp/_test_az1.mut", ".", List[str]())
+
+ok := True
+if not r1.success
+    print("FAIL: analysis should succeed")
+    ok = False
+end
+
+# Check we have symbols
+if len(r1.symbols) == 0
+    print("FAIL: no symbols collected")
+    ok = False
+end
+
+# Find specific symbols by name and kind
+found_add := False
+found_point := False
+found_vec2 := False
+found_ishape := False
+found_color := False
+found_max := False
+found_x := False
+found_point_x := False
+found_point_sum := False
+found_color_red := False
+found_ishape_area := False
+found_add_a := False
+
+i: i64 = 0
+while i < len(r1.symbols)
+    sym := r1.symbols[i]
+    if sym.name == "add" and sym.kind == "function"
+        found_add = True
+        if sym.doc != "Adds two numbers"
+            print(format("FAIL: add doc = '{}', expected 'Adds two numbers'", sym.doc))
+            ok = False
+        end
+        if sym.file != "/tmp/_test_az1.mut"
+            print(format("FAIL: add file = '{}', expected '/tmp/_test_az1.mut'", sym.file))
+            ok = False
+        end
+        if sym.line != 2
+            print(format("FAIL: add line = {}, expected 2", sym.line))
+            ok = False
+        end
+    elif sym.name == "Point" and sym.kind == "class"
+        found_point = True
+    elif sym.name == "Vec2" and sym.kind == "struct"
+        found_vec2 = True
+    elif sym.name == "IShape" and sym.kind == "interface"
+        found_ishape = True
+    elif sym.name == "Color" and sym.kind == "enum"
+        found_color = True
+    elif sym.name == "MAX" and sym.kind == "constant"
+        found_max = True
+    elif sym.name == "x" and sym.kind == "variable"
+        found_x = True
+    elif sym.name == "Point.x" and sym.kind == "field"
+        found_point_x = True
+        if sym.parent != "Point"
+            print(format("FAIL: Point.x parent = '{}', expected 'Point'", sym.parent))
+            ok = False
+        end
+    elif sym.name == "Point.sum" and sym.kind == "method"
+        found_point_sum = True
+        if sym.parent != "Point"
+            print(format("FAIL: Point.sum parent = '{}', expected 'Point'", sym.parent))
+            ok = False
+        end
+    elif sym.name == "Color.RED" and sym.kind == "enum_variant"
+        found_color_red = True
+        if sym.parent != "Color"
+            print(format("FAIL: Color.RED parent = '{}', expected 'Color'", sym.parent))
+            ok = False
+        end
+    elif sym.name == "IShape.area" and sym.kind == "method_sig"
+        found_ishape_area = True
+        if sym.parent != "IShape"
+            print(format("FAIL: IShape.area parent = '{}', expected 'IShape'", sym.parent))
+            ok = False
+        end
+    elif sym.name == "add.a" and sym.kind == "parameter"
+        found_add_a = True
+        if sym.parent != "add"
+            print(format("FAIL: add.a parent = '{}', expected 'add'", sym.parent))
+            ok = False
+        end
+    end
+    i += 1
+end
+
+if not found_add
+    print("FAIL: function 'add' not found")
+    ok = False
+end
+if not found_point
+    print("FAIL: class 'Point' not found")
+    ok = False
+end
+if not found_vec2
+    print("FAIL: struct 'Vec2' not found")
+    ok = False
+end
+if not found_ishape
+    print("FAIL: interface 'IShape' not found")
+    ok = False
+end
+if not found_color
+    print("FAIL: enum 'Color' not found")
+    ok = False
+end
+if not found_max
+    print("FAIL: constant 'MAX' not found")
+    ok = False
+end
+if not found_x
+    print("FAIL: variable 'x' not found")
+    ok = False
+end
+if not found_point_x
+    print("FAIL: field 'Point.x' not found")
+    ok = False
+end
+if not found_point_sum
+    print("FAIL: method 'Point.sum' not found")
+    ok = False
+end
+if not found_color_red
+    print("FAIL: enum_variant 'Color.RED' not found")
+    ok = False
+end
+if not found_ishape_area
+    print("FAIL: method_sig 'IShape.area' not found")
+    ok = False
+end
+if not found_add_a
+    print("FAIL: parameter 'add.a' not found")
+    ok = False
+end
+
+if ok
+    print("PASS")
+end
+
+# ─── Test 2: JSON output format ─────────────────────────────────────
+
+print("--- test 2: JSON output ---")
+
+src2 := "# A helper\ndef helper() -> i64\n    return 1\nend\n"
+filesystem.write("/tmp/_test_az2.mut", src2)
+r2 := az.analyze("/tmp/_test_az2.mut", ".", List[str]())
+json := az.result_to_json(r2)
+
+ok2 := True
+# Check JSON contains key fields
+if string.find(json, "\"success\": true") < 0
+    print("FAIL: JSON missing success:true")
+    ok2 = False
+end
+if string.find(json, "\"file\":") < 0
+    print("FAIL: JSON missing file field in symbols")
+    ok2 = False
+end
+if string.find(json, "\"parent\":") < 0
+    print("FAIL: JSON missing parent field in symbols")
+    ok2 = False
+end
+if string.find(json, "\"kind\": \"function\"") < 0
+    print("FAIL: JSON missing function kind")
+    ok2 = False
+end
+if string.find(json, "\"doc\": \"A helper\"") < 0
+    print("FAIL: JSON missing doc comment")
+    ok2 = False
+end
+if ok2
+    print("PASS")
+end
+
+# ─── Test 3: file tracking across imports ────────────────────────────
+
+print("--- test 3: imported symbol file tracking ---")
+
+filesystem.write("/tmp/_test_az_lib.mut", "def lib_func() -> i64\n    return 99\nend\n\nclass LibClass\n    val: i64\n    def init(self, val: i64)\n        self.val = val\n    end\nend\n")
+
+src3 := "import _test_az_lib as lib\nx := lib.lib_func()\n"
+filesystem.write("/tmp/_test_az3.mut", src3)
+r3 := az.analyze("/tmp/_test_az3.mut", ".", List[str]())
+
+ok3 := True
+if not r3.success
+    print("FAIL: analysis should succeed")
+    ok3 = False
+end
+
+# Imported functions get mangled names but should retain file info
+found_lib_func := False
+found_lib_class := False
+j: i64 = 0
+while j < len(r3.symbols)
+    sym := r3.symbols[j]
+    if sym.name == "lib__lib_func" and sym.kind == "function"
+        found_lib_func = True
+        if sym.file != "/tmp/_test_az_lib.mut"
+            print(format("FAIL: lib_func file = '{}', expected '/tmp/_test_az_lib.mut'", sym.file))
+            ok3 = False
+        end
+    elif sym.name == "lib__LibClass" and sym.kind == "class"
+        found_lib_class = True
+        if sym.file != "/tmp/_test_az_lib.mut"
+            print(format("FAIL: LibClass file = '{}', expected '/tmp/_test_az_lib.mut'", sym.file))
+            ok3 = False
+        end
+    end
+    j += 1
+end
+
+if not found_lib_func
+    print("FAIL: imported function 'lib__lib_func' not found")
+    ok3 = False
+end
+if not found_lib_class
+    print("FAIL: imported class 'lib__LibClass' not found")
+    ok3 = False
+end
+
+if ok3
+    print("PASS")
+end
+
+# ─── Test 4: error diagnostics ───────────────────────────────────────
+
+print("--- test 4: error diagnostics ---")
+
+src4 := "x: i64 = \"hello\"\n"
+filesystem.write("/tmp/_test_az4.mut", src4)
+r4 := az.analyze("/tmp/_test_az4.mut", ".", List[str]())
+
+ok4 := True
+if r4.success
+    print("FAIL: analysis should fail on type error")
+    ok4 = False
+end
+if r4.error_count == 0
+    print("FAIL: expected errors")
+    ok4 = False
+end
+if ok4
+    print("PASS")
+end
+
+print("--- done ---")

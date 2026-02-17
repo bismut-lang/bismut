@@ -1,0 +1,928 @@
+# cg_stmt.mut -- Statement emission + function/method body emission
+#
+# emit_stmt()          dispatches all statement types
+# emit_function()      emits a top-level function body
+# emit_class_methods() emits dtor/retain/release/constructor + methods
+# emit_method() emits a single class or struct method body
+# emit_extern_type_methods() emits dtor/retain/release/wrap for extern types
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import parser as mp
+import strutils as su
+import cg_types as ct
+import type_utils as tu
+import cg_state as cs
+import cg_emit as ce
+import cg_expr as cx
+import import_resolver as ir
+
+# ─── Helper: find field type in a CLASS_DECL by name ─────────────────
+
+def _field_type(cls: pars.Node, member: str) -> str
+    i: i64 = 0
+    while i < cls.child_count()
+        ch := cls.child(i)
+        if ch.kind == mp.NodeKind.FIELD_DECL and ch.value == member
+            return tu.type_node_to_str(ch.child(0))
+        end
+        i += 1
+    end
+    return ""
+end
+
+# ─── emit_stmt ───────────────────────────────────────────────────────
+
+def emit_stmt(cg: cs.CodeGen, st: pars.Node, allow_break: bool, allow_continue: bool)
+    # Set source location for automatic #line emission by cg.w()
+    if cg.debug_lines and st.line > 0
+        src_file := st.file
+        if src_file == "" or src_file == None
+            src_file = cg.file
+        end
+        if len(src_file) > 0
+            cg.cur_debug_line = st.line
+            cg.cur_debug_file = src_file
+        end
+    end
+
+    k := st.kind
+
+    # ---- VAR_DECL / CONST_DECL ----
+    if k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL
+        _emit_var_decl(cg, st)
+        return
+    end
+
+    # ---- STATIC_DECL ----
+    if k == mp.NodeKind.STATIC_DECL
+        _emit_static_decl(cg, st)
+        return
+    end
+
+    # ---- ASSIGN ----
+    if k == mp.NodeKind.ASSIGN
+        _emit_assign(cg, st)
+        return
+    end
+
+    # ---- MEMBER_ASSIGN ----
+    if k == mp.NodeKind.MEMBER_ASSIGN
+        _emit_member_assign(cg, st)
+        return
+    end
+
+    # ---- INDEX_ASSIGN ----
+    if k == mp.NodeKind.INDEX_ASSIGN
+        _emit_index_assign(cg, st)
+        return
+    end
+
+    # ---- EXPR_STMT ----
+    if k == mp.NodeKind.EXPR_STMT
+        _emit_expr_stmt(cg, st)
+        return
+    end
+
+    # ---- RETURN ----
+    if k == mp.NodeKind.RETURN
+        _emit_return(cg, st)
+        return
+    end
+
+    # ---- BREAK ----
+    if k == mp.NodeKind.BREAK
+        src := cg.src(st)
+        cg.release_loop_scopes(src)
+        cg.w("break;")
+        return
+    end
+
+    # ---- CONTINUE ----
+    if k == mp.NodeKind.CONTINUE
+        src := cg.src(st)
+        cg.release_loop_scopes(src)
+        cg.w("continue;")
+        return
+    end
+
+    # ---- WHILE ----
+    if k == mp.NodeKind.WHILE
+        _emit_while(cg, st)
+        return
+    end
+
+    # ---- FOR ----
+    if k == mp.NodeKind.FOR
+        _emit_for(cg, st)
+        return
+    end
+
+    # ---- IF ----
+    if k == mp.NodeKind.IF
+        _emit_if(cg, st, allow_break, allow_continue)
+        return
+    end
+
+    # ---- BLOCK ----
+    if k == mp.NodeKind.BLOCK
+        src := cg.src(st)
+        cg.w("{")
+        cg.ind += 1
+        cg.push_scope()
+        i: i64 = 0
+        while i < st.child_count()
+            emit_stmt(cg, st.child(i), allow_break, allow_continue)
+            i += 1
+        end
+        cg.pop_scope(src)
+        cg.ind -= 1
+        cg.w("}")
+        return
+    end
+
+    # ---- TUPLE_DESTRUCT ----
+    if k == mp.NodeKind.TUPLE_DESTRUCT
+        _emit_tuple_destruct(cg, st)
+        return
+    end
+end
+
+# ─── VAR_DECL / CONST_DECL ──────────────────────────────────────────
+
+def _emit_var_decl(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    # walrus: 1 child (init_expr, type in node.ty)
+    # typed:  2 children [TYPE, init_expr]
+    if st.child_count() == 1
+        ty := st.ty
+        ct_str := ct.c_type(ty)
+        cg.mark_type_use(ty)
+        vi := cg.declare_var(st.value, ty)
+        expr_c, expr_ty := cx.emit_expr(cg, st.child(0))
+        expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, ty)
+        cg.w(format("{} {} = {};", ct_str, vi.c_name, expr_c))
+        if ct.is_ref_type(ty) and cs.expr_is_borrowed(st.child(0))
+            cg.emit_retain_value(ty, vi.c_name, src)
+        end
+    else
+        ty := tu.type_node_to_str(st.child(0))
+        ct_str := ct.c_type(ty)
+        cg.mark_type_use(ty)
+        vi := cg.declare_var(st.value, ty)
+        expr_c, expr_ty := cx.emit_expr(cg, st.child(1))
+        expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, ty)
+        cg.w(format("{} {} = {};", ct_str, vi.c_name, expr_c))
+        if ct.is_ref_type(ty) and cs.expr_is_borrowed(st.child(1))
+            cg.emit_retain_value(ty, vi.c_name, src)
+        end
+    end
+    cg.flush_pending_releases(src)
+end
+
+# ─── STATIC_DECL ────────────────────────────────────────────────────
+
+def _emit_static_decl(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    # Same child layout as VAR_DECL
+    ty: str = ""
+    init_expr: pars.Node = pars.leaf(0, pars.Token(0, "", 0, 0))
+    if st.child_count() == 1
+        ty = st.ty
+        init_expr = st.child(0)
+    else
+        ty = tu.type_node_to_str(st.child(0))
+        init_expr = st.child(1)
+    end
+    ct_str := ct.c_type(ty)
+    cg.mark_type_use(ty)
+    vi := cg.declare_var(st.value, ty)
+    vi.is_static = True
+
+    expr_c, expr_ty := cx.emit_expr(cg, init_expr)
+    expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, ty)
+
+    guard := format("_init_{}", vi.c_name)
+    cg.w(format("static int {} = 0;", guard))
+    cg.w(format("static {} {};", ct_str, vi.c_name))
+    cg.w(format("if (!{}) ", guard) + "{")
+    cg.ind += 1
+    cg.w(format("{} = 1;", guard))
+    cg.w(format("{} = {};", vi.c_name, expr_c))
+    if ct.is_ref_type(ty) and cs.expr_is_borrowed(init_expr)
+        cg.emit_retain_value(ty, vi.c_name, src)
+    end
+    cg.ind -= 1
+    cg.w("}")
+end
+
+# ─── ASSIGN ─────────────────────────────────────────────────────────
+
+def _emit_assign(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    op := st.value
+    target := st.child(0)
+    val_expr := st.child(1)
+    vi := cg.lookup(target.value)
+
+    expr_c, expr_ty := cx.emit_expr(cg, val_expr)
+
+    if op == "="
+        if ct.is_ref_type(vi.ty)
+            expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, vi.ty)
+            tmp := cg.new_tmp()
+            cg.w(format("{} {} = {};", ct.c_type(vi.ty), tmp, expr_c))
+            if cs.expr_is_borrowed(val_expr)
+                cg.emit_retain_value(vi.ty, tmp, src)
+            end
+            cg.emit_release(vi, src)
+            cg.w(format("{} = {};", vi.c_name, tmp))
+            cg.flush_pending_releases(src)
+        else
+            cg.w(format("{} = {};", vi.c_name, expr_c))
+            cg.flush_pending_releases(src)
+        end
+        return
+    end
+
+    # Compound assigns: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=
+    if op == "+=" and vi.ty == "str"
+        tmp := cg.new_tmp()
+        cg.w(format("__lang_rt_Str* {} = __lang_rt_str_concat({}, {}, {});", tmp, src, vi.c_name, expr_c))
+        cg.w(format("__lang_rt_str_release({}); (void){};", vi.c_name, src))
+        if not cs.expr_is_borrowed(val_expr)
+            cg.w(format("__lang_rt_str_release({}); (void){};", expr_c, src))
+        end
+        cg.w(format("{} = {};", vi.c_name, tmp))
+        return
+    end
+    cg.w(format("{} {} {};", vi.c_name, op, expr_c))
+end
+
+# ─── MEMBER_ASSIGN ──────────────────────────────────────────────────
+
+def _emit_member_assign(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    op := st.value
+    member_node := st.child(0)
+    val_expr := st.child(1)
+
+    # member_node is a MEMBER node: children=[obj], value=field_name
+    obj_expr := member_node.child(0)
+    member := member_node.value
+
+    obj_c, obj_ty := cx.emit_expr(cg, obj_expr)
+    expr_c, expr_ty := cx.emit_expr(cg, val_expr)
+
+    # Struct fields: value type, dot access, no refcounting
+    if ct.is_struct(obj_ty)
+        field_c := format("{}.{}", obj_c, ct.ci(member))
+        if op == "="
+            cg.w(format("{} = {};", field_c, expr_c))
+        else
+            cg.w(format("{} {} {};", field_c, op, expr_c))
+        end
+        cg.flush_pending_releases(src)
+        return
+    end
+
+    # Class fields: arrow access, null check, refcounting
+    if ct.is_class(obj_ty)
+        cg.w(format("__lang_rt_null_check({}, {});", obj_c, src))
+    end
+
+    field_c := format("{}->{}", obj_c, ct.ci(member))
+
+    # Look up field type
+    field_ty := ""
+    if ct.is_class(obj_ty) and has(cg.class_defs, obj_ty)
+        field_ty = _field_type(cg.class_defs[obj_ty], member)
+    end
+
+    if op == "="
+        if len(field_ty) > 0
+            expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, field_ty)
+        end
+        if len(field_ty) > 0 and ct.is_ref_type(field_ty)
+            # Materialize RHS into temp FIRST (RHS may reference the same field)
+            tmp := cg.new_tmp()
+            cg.w(format("{} {} = {};", ct.c_type(field_ty), tmp, expr_c))
+            if cs.expr_is_borrowed(val_expr)
+                cg.emit_retain_value(field_ty, tmp, src)
+            end
+            fvi := cs.VarInfo(field_c, field_ty)
+            cg.emit_release(fvi, src)
+            cg.w(format("{} = {};", field_c, tmp))
+        else
+            cg.w(format("{} = {};", field_c, expr_c))
+        end
+    else
+        cg.w(format("{} {} {};", field_c, op, expr_c))
+    end
+    cg.flush_pending_releases(src)
+end
+
+# ─── INDEX_ASSIGN ───────────────────────────────────────────────────
+
+def _emit_index_assign(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    obj_expr := st.child(0)
+    idx_expr := st.child(1)
+    val_expr := st.child(2)
+
+    obj_c, obj_ty := cx.emit_expr(cg, obj_expr)
+    idx_c, idx_ty := cx.emit_expr(cg, idx_expr)
+    idx_c = cg.emit_arg_safe(idx_expr, idx_c, idx_ty)
+    expr_c, expr_ty := cx.emit_expr(cg, val_expr)
+    expr_c = cg.emit_arg_safe(val_expr, expr_c, expr_ty)
+
+    if tu.is_list_type(obj_ty)
+        elem := tu.list_elem_type(obj_ty)
+        tag := ct.elem_tag(elem)
+        cg.used_list_tags[tag] = 1
+        expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, elem)
+        cg.w(format("__lang_rt_list_{}_set({}, {}, {}, {});", tag, src, obj_c, idx_c, expr_c))
+    elif tu.is_dict_type(obj_ty)
+        combined := ct.dict_combined_tag(obj_ty)
+        cg.used_dict_tags[combined] = 1
+        val := tu.dict_val_type(obj_ty)
+        expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, val)
+        cg.w(format("__lang_rt_dict_{}_set({}, {}, {}, {});", combined, src, obj_c, idx_c, expr_c))
+    end
+    cg.flush_pending_releases(src)
+end
+
+# ─── EXPR_STMT ──────────────────────────────────────────────────────
+
+def _emit_expr_stmt(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    inner := st.child(0)
+    expr_c, expr_ty := cx.emit_expr(cg, inner)
+
+    if expr_ty == "void"
+        cg.w(format("{};", expr_c))
+        # Check for print => emit newline
+        if inner.kind == mp.NodeKind.CALL and inner.child_count() > 0
+            callee := inner.child(0)
+            if callee.kind == mp.NodeKind.IDENT and callee.value == "print"
+                cg.w("__lang_rt_print_ln();")
+            end
+        end
+    elif ct.is_ref_type(expr_ty) and not cs.expr_is_borrowed(inner)
+        # Owned ref from expression statement — release it
+        tmp := cg.new_tmp()
+        cg.w(format("{} {} = {};", ct.c_type(expr_ty), tmp, expr_c))
+        cg.emit_release(cs.VarInfo(tmp, expr_ty), src)
+    else
+        cg.w(format("(void)({});", expr_c))
+    end
+    cg.flush_pending_releases(src)
+end
+
+# ─── RETURN ─────────────────────────────────────────────────────────
+
+def _emit_return(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+
+    # Bare return: release all scopes before returning
+    if st.child_count() == 0
+        cg.flush_pending_releases(src)
+        cg.release_all_scopes(src)
+        cg.emit_return_default_for(cg.cur_fn_ret, src)
+        return
+    end
+
+    val_expr := st.child(0)
+    expr_c, expr_ty := cx.emit_expr(cg, val_expr)
+    ret_ty := cg.cur_fn_ret
+
+    # Wrap class->interface if needed
+    wrapped_c := cg.maybe_wrap_iface(expr_c, expr_ty, ret_ty)
+
+    actual_ty := expr_ty
+    if ct.is_iface(ret_ty) and ct.is_class(expr_ty)
+        actual_ty = ret_ty
+    end
+    if actual_ty == "none"
+        actual_ty = ret_ty
+    end
+
+    ret_tmp := cg.new_tmp()
+    cg.w(format("{} {} = {};", ct.c_type(actual_ty), ret_tmp, wrapped_c))
+
+    # Retain BEFORE flushing pending releases
+    if ct.is_ref_type(actual_ty) and cs.expr_is_borrowed(val_expr)
+        cg.emit_retain_value(actual_ty, ret_tmp, src)
+    end
+    cg.flush_pending_releases(src)
+    cg.release_all_scopes(src)
+    cg.w(format("return {};", ret_tmp))
+end
+
+# ─── WHILE ──────────────────────────────────────────────────────────
+
+def _emit_while(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    cond_expr := st.child(0)
+    body := st.child(1)
+
+    cg.w("while (1) {")
+    cg.ind += 1
+    cond_c, cond_ty := cx.emit_expr(cg, cond_expr)
+    if len(cg.pending_releases) > 0
+        tmp := cg.new_tmp()
+        cg.w(format("bool {} = {};", tmp, cond_c))
+        cond_c = tmp
+    end
+    cg.flush_pending_releases(src)
+    cg.w(format("if (!({}))", cond_c) + " break;")
+
+    append(cg.loop_scope_depth, len(cg.scope_vars))
+    cg.push_scope()
+    i: i64 = 0
+    while i < body.child_count()
+        emit_stmt(cg, body.child(i), True, True)
+        i += 1
+    end
+    cg.pop_scope(src)
+    # Pop loop depth
+    pop(cg.loop_scope_depth)
+
+    cg.ind -= 1
+    cg.w("}")
+end
+
+# ─── FOR ────────────────────────────────────────────────────────────
+
+def _emit_for(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    var_name := st.value
+    type_node := st.child(0)
+    iter_expr := st.child(1)
+    body := st.child(2)
+
+    iter_c, iter_ty := cx.emit_expr(cg, iter_expr)
+
+    # Must be List type
+    elem_ty := tu.list_elem_type(iter_ty)
+    tag := ct.elem_tag(elem_ty)
+    c_elem := ct.elem_c_type(elem_ty)
+
+    iter_tmp := cg.new_tmp()
+    idx_tmp := cg.new_tmp()
+    cg.w(format("__lang_rt_List_{}* {} = {};", tag, iter_tmp, iter_c))
+
+    append(cg.loop_scope_depth, len(cg.scope_vars))
+    cg.push_scope()
+    vi := cg.declare_var(var_name, elem_ty)
+
+    cg.w(format("for (int64_t {} = 0; {} < (int64_t){}->" + "len; {}++) ", idx_tmp, idx_tmp, iter_tmp, idx_tmp) + "{")
+    cg.ind += 1
+    cg.w(format("{} {} = {}->" + "data[(uint32_t){}];", c_elem, vi.c_name, iter_tmp, idx_tmp))
+
+    # Retain element if ref type (borrowed from list)
+    if ct.is_ref_type(elem_ty)
+        cg.emit_retain_value(elem_ty, vi.c_name, src)
+    end
+
+    # Inner scope for body-declared variables
+    cg.push_scope()
+    i: i64 = 0
+    while i < body.child_count()
+        emit_stmt(cg, body.child(i), True, True)
+        i += 1
+    end
+    cg.pop_scope(src)
+
+    # Release loop var if ref type
+    if ct.is_ref_type(elem_ty)
+        cg.emit_release(vi, src)
+    end
+
+    cg.ind -= 1
+    cg.w("}")
+
+    # Release owned iterator (e.g. range()/keys())
+    if not cs.expr_is_borrowed(iter_expr)
+        tmp_vi := cs.VarInfo(iter_tmp, iter_ty)
+        cg.emit_release(tmp_vi, src)
+    end
+    cg.flush_pending_releases(src)
+
+    # Pop loop depth
+    pop(cg.loop_scope_depth)
+
+    # Pop the outer for-scope (env + scope_vars) manually
+    pop(cg.env)
+    pop(cg.scope_vars)
+end
+
+# ─── IF ─────────────────────────────────────────────────────────────
+
+def _emit_if(cg: cs.CodeGen, st: pars.Node, allow_break: bool, allow_continue: bool)
+    src := cg.src(st)
+    first := True
+    elif_depth: i64 = 0
+
+    i: i64 = 0
+    while i < st.child_count()
+        arm := st.child(i)
+        arm_kind := arm.value   # "if", "elif", or "else"
+
+        if arm_kind == "else"
+            cg.w("else {")
+        else
+            if first
+                cond_c, cond_ty := cx.emit_expr(cg, arm.child(0))
+                if len(cg.pending_releases) > 0
+                    tmp := cg.new_tmp()
+                    cg.w(format("bool {} = {};", tmp, cond_c))
+                    cond_c = tmp
+                end
+                cg.flush_pending_releases(src)
+                cg.w(format("if ({}) ", cond_c) + "{")
+                first = False
+            else
+                # Wrap elif in else { ... }
+                cg.w("else {")
+                cg.ind += 1
+                elif_depth += 1
+                cond_c, cond_ty := cx.emit_expr(cg, arm.child(0))
+                if len(cg.pending_releases) > 0
+                    tmp := cg.new_tmp()
+                    cg.w(format("bool {} = {};", tmp, cond_c))
+                    cond_c = tmp
+                end
+                cg.flush_pending_releases(src)
+                cg.w(format("if ({}) ", cond_c) + "{")
+            end
+        end
+
+        cg.ind += 1
+        cg.push_scope()
+
+        # Body is last child for if/elif (children=[cond, block]), only child for else
+        body_block: pars.Node = pars.leaf(0, pars.Token(0, "", 0, 0))
+        if arm_kind == "else"
+            body_block = arm.child(0)
+        else
+            body_block = arm.child(1)
+        end
+
+        j: i64 = 0
+        while j < body_block.child_count()
+            emit_stmt(cg, body_block.child(j), allow_break, allow_continue)
+            j += 1
+        end
+
+        cg.pop_scope(src)
+        cg.ind -= 1
+        cg.w("}")
+        i += 1
+    end
+
+    # Close elif wrappers
+    k: i64 = 0
+    while k < elif_depth
+        cg.ind -= 1
+        cg.w("}")
+        k += 1
+    end
+end
+
+# ─── TUPLE_DESTRUCT ────────────────────────────────────────────────
+
+def _emit_tuple_destruct(cg: cs.CodeGen, st: pars.Node)
+    src := cg.src(st)
+    # children: [IDENT(name1), IDENT(name2), ..., value_expr]
+    nch := st.child_count()
+    val_expr := st.child(nch - 1)
+
+    expr_c, expr_ty := cx.emit_expr(cg, val_expr)
+    elem_types := tu.tuple_elem_types(expr_ty)
+    struct_name := ct.tuple_struct_name(expr_ty)
+    cg.mark_type_use(expr_ty)
+
+    tmp := cg.new_tmp()
+    cg.w(format("{} {} = {};", struct_name, tmp, expr_c))
+
+    borrowed := cs.expr_is_borrowed(val_expr)
+    i: i64 = 0
+    while i < nch - 1
+        name := st.child(i).value
+        ety := elem_types[i]
+        vi := cg.declare_var(name, ety)
+        ct_str := ct.c_type(ety)
+        cg.w(format("{} {} = {}.f{};", ct_str, vi.c_name, tmp, i))
+        if ct.is_ref_type(ety) and borrowed
+            cg.emit_retain_value(ety, vi.c_name, src)
+        end
+        i += 1
+    end
+    cg.flush_pending_releases(src)
+end
+
+# ─── emit_function (top-level) ──────────────────────────────────────
+
+def emit_function(cg: cs.CodeGen, f: pars.Node)
+    # Set source location for #line emission before function definition
+    if cg.debug_lines and f.line > 0
+        src_file := f.file
+        if src_file == "" or src_file == None
+            src_file = cg.file
+        end
+        if len(src_file) > 0
+            cg.cur_debug_line = f.line
+            cg.cur_debug_file = src_file
+        end
+    end
+
+    ret_ty := tu.func_ret_type_str(f)
+    cg.cur_fn_ret = ret_ty
+    proto := ce.fn_proto(cg, f)
+    cg.w(proto + " {")
+    cg.ind += 1
+
+    cg.push_scope()
+
+    # Parameters in env but NOT in scope_vars (borrowed from caller)
+    pb := tu.func_params_block(f)
+    i: i64 = 0
+    while i < pb.child_count()
+        p := pb.child(i)
+        p_name := p.value
+        p_ty := tu.type_node_to_str(p.child(0))
+        vi := cs.VarInfo(ct.ci(p_name), p_ty)
+        cg.env[len(cg.env) - 1][p_name] = vi
+        i += 1
+    end
+
+    # Body
+    cg.in_user_func = True
+    body := tu.func_body(f)
+    i = 0
+    while i < body.child_count()
+        emit_stmt(cg, body.child(i), False, False)
+        i += 1
+    end
+    cg.in_user_func = False
+
+    # Default return
+    src := cg.src(f)
+    cg.cur_debug_line = 0
+    cg.cur_debug_file = ""
+    cg.emit_default_return(ret_ty, src)
+    cg.pop_scope(src)
+    cg.ind -= 1
+    cg.w("}")
+    cg.cur_fn_ret = ""
+end
+
+# ─── emit_class_methods ─────────────────────────────────────────────
+
+def emit_class_methods(cg: cs.CodeGen, cls: pars.Node)
+    name := cls.value
+    if has(cg.extern_info.type_info, name)
+        emit_extern_type_methods(cg, cls)
+        return
+    end
+
+    # ---- Destructor ----
+    cg.w(format("static void __lang_rt_class_{}_dtor(void* obj) ", name) + "{")
+    cg.ind += 1
+    cg.w(format("__lang_rt_Class_{}* self = (__lang_rt_Class_{}*)obj;", name, name))
+    i: i64 = 0
+    while i < cls.child_count()
+        fd := cls.child(i)
+        if fd.kind == mp.NodeKind.FIELD_DECL
+            fd_name := fd.value
+            fd_ty := tu.type_node_to_str(fd.child(0))
+            ci_fn := ct.ci(fd_name)
+            if ct.is_ref_type(fd_ty)
+                if fd_ty == "str"
+                    cg.w(format("if (self->{}) __lang_rt_str_release(self->{});", ci_fn, ci_fn))
+                elif tu.is_list_type(fd_ty)
+                    tag := ct.elem_tag(tu.list_elem_type(fd_ty))
+                    cg.w(format("if (self->{}) __lang_rt_list_{}_release(self->{});", ci_fn, tag, ci_fn))
+                elif tu.is_dict_type(fd_ty)
+                    combined := ct.dict_combined_tag(fd_ty)
+                    cg.w(format("if (self->{}) __lang_rt_dict_{}_release(self->{});", ci_fn, combined, ci_fn))
+                elif ct.is_iface(fd_ty)
+                    cg.w(format("if (self->{}.obj) self->{}.vtbl->release(self->{}.obj);", ci_fn, ci_fn, ci_fn))
+                elif ct.is_class(fd_ty)
+                    cg.w(format("if (self->{}) __lang_rt_class_{}_release(self->{});", ci_fn, fd_ty, ci_fn))
+                end
+            end
+        end
+        i += 1
+    end
+    cg.w("free(self);")
+    cg.ind -= 1
+    cg.w("}")
+    cg.w_empty()
+
+    # ---- Retain / Release ----
+    cg.w(format("static void __lang_rt_class_{}_retain(__lang_rt_Class_{}* o) ", name, name) + "{ __lang_rt_retain(o); }")
+    cg.w(format("static void __lang_rt_class_{}_release(__lang_rt_Class_{}* o) ", name, name) + "{ __lang_rt_release(o, __lang_rt_class_" + name + "_dtor); }")
+    cg.w_empty()
+
+    # ---- Constructor ----
+    # Find init method
+    init_method: pars.Node = None
+    i = 0
+    while i < cls.child_count()
+        ch := cls.child(i)
+        if ch.kind == mp.NodeKind.FUNC_DECL and ch.value == "init"
+            init_method = ch
+            break
+        end
+        i += 1
+    end
+
+    # Build constructor params (skip self in init)
+    params_c := ""
+    if init_method != None
+        params_c = ce.method_params(name, init_method, False)
+        # Remove "Class* self" prefix — we only want the remaining params
+        # class_method_params returns "Class* self, p1, p2, ..."
+        # We need just "p1, p2, ..." for the constructor
+        prefix := format("__lang_rt_Class_{}* self", name)
+        if len(params_c) > len(prefix)
+            # Has extra ", params..."
+            params_c = string.substr(params_c, len(prefix) + 2, len(params_c) - len(prefix) - 2)
+        else
+            params_c = ""
+        end
+    end
+
+    if len(params_c) > 0
+        cg.w(format("static __lang_rt_Class_{}* __lang_rt_class_{}_new(__lang_rt_Src __lang_rt__src, {}) ", name, name, params_c) + "{")
+    else
+        cg.w(format("static __lang_rt_Class_{}* __lang_rt_class_{}_new(__lang_rt_Src __lang_rt__src) ", name, name) + "{")
+    end
+    cg.ind += 1
+    cg.w(format("__lang_rt_Class_{}* self = (__lang_rt_Class_{}*)__lang_rt_malloc(__lang_rt__src, sizeof(__lang_rt_Class_{}));", name, name, name))
+    cg.w("__lang_rt_rc_init(&self->rc);")
+
+    # Zero-init all fields
+    i = 0
+    while i < cls.child_count()
+        fd := cls.child(i)
+        if fd.kind == mp.NodeKind.FIELD_DECL
+            fd_name := fd.value
+            fd_ty := tu.type_node_to_str(fd.child(0))
+            ci_fn := ct.ci(fd_name)
+            if ct.is_iface(fd_ty)
+                cg.w(format("self->{}.obj = NULL;", ci_fn))
+                cg.w(format("self->{}.vtbl = NULL;", ci_fn))
+            elif ct.is_ref_type(fd_ty)
+                cg.w(format("self->{} = NULL;", ci_fn))
+            elif fd_ty == "i8" or fd_ty == "i16" or fd_ty == "i32" or fd_ty == "i64" or fd_ty == "u8" or fd_ty == "u16" or fd_ty == "u32" or fd_ty == "u64"
+                cg.w(format("self->{} = 0;", ci_fn))
+            elif fd_ty == "f32" or fd_ty == "f64"
+                cg.w(format("self->{} = 0.0;", ci_fn))
+            elif fd_ty == "bool"
+                cg.w(format("self->{} = false;", ci_fn))
+            elif ct.is_enum(fd_ty)
+                cg.w(format("self->{} = 0;", ci_fn))
+            end
+        end
+        i += 1
+    end
+
+    # Emit init body if present
+    if init_method != None
+        cg.push_scope()
+        # self already defined as local above
+        vi_self := cs.VarInfo("self", name)
+        cg.env[len(cg.env) - 1]["self"] = vi_self
+        # Don't add self to scope_vars (we don't release it)
+        pb := tu.func_params_block(init_method)
+        j: i64 = 0
+        while j < pb.child_count()
+            p := pb.child(j)
+            if p.value != "self"
+                p_ty := tu.type_node_to_str(p.child(0))
+                vi := cs.VarInfo(ct.ci(p.value), p_ty)
+                cg.env[len(cg.env) - 1][p.value] = vi
+                append(cg.scope_vars[len(cg.scope_vars) - 1], vi)
+            end
+            j += 1
+        end
+        body := tu.func_body(init_method)
+        cg.in_user_func = True
+        j = 0
+        while j < body.child_count()
+            emit_stmt(cg, body.child(j), False, False)
+            j += 1
+        end
+        cg.in_user_func = False
+        # Pop manually (don't release self)
+        pop(cg.env)
+        pop(cg.scope_vars)
+    end
+
+    cg.w("return self;")
+    cg.ind -= 1
+    cg.w("}")
+    cg.w_empty()
+
+    # ---- Other methods ----
+    i = 0
+    while i < cls.child_count()
+        ch := cls.child(i)
+        if ch.kind == mp.NodeKind.FUNC_DECL and ch.value != "init"
+            emit_method(cg, cls, ch, False)
+        end
+        i += 1
+    end
+end
+
+# ─── emit_method ────────────────────────────────────────────────────
+
+def emit_method(cg: cs.CodeGen, type_decl: pars.Node, m: pars.Node, is_struct: bool)
+    name := type_decl.value
+    ret_ty := tu.func_ret_type_str(m)
+    params_c := ce.method_params(name, m, is_struct)
+    prefix: str = "struct"
+    if not is_struct
+        prefix = "class"
+    end
+
+    cg.cur_fn_ret = ret_ty
+    cg.w(format("static {} __lang_rt_{}_{}_{}({}) ", ct.c_type(ret_ty), prefix, name, m.value, params_c) + "{")
+    cg.ind += 1
+
+    cg.push_scope()
+    # self in env but not scope_vars (don't release)
+    vi_self := cs.VarInfo("self", name)
+    cg.env[len(cg.env) - 1]["self"] = vi_self
+    # Non-self params borrowed from caller
+    pb := tu.func_params_block(m)
+    i: i64 = 0
+    while i < pb.child_count()
+        p := pb.child(i)
+        if p.value != "self"
+            p_ty := tu.type_node_to_str(p.child(0))
+            vi := cs.VarInfo(ct.ci(p.value), p_ty)
+            cg.env[len(cg.env) - 1][p.value] = vi
+        end
+        i += 1
+    end
+
+    cg.in_user_func = True
+    body := tu.func_body(m)
+    i = 0
+    while i < body.child_count()
+        emit_stmt(cg, body.child(i), False, False)
+        i += 1
+    end
+    cg.in_user_func = False
+
+    src := cg.src(m)
+    cg.emit_default_return(ret_ty, src)
+    cg.pop_scope(src)
+    cg.ind -= 1
+    cg.w("}")
+    cg.w_empty()
+    cg.cur_fn_ret = ""
+end
+
+# ─── emit_extern_type_methods ───────────────────────────────────────
+
+def emit_extern_type_methods(cg: cs.CodeGen, cls: pars.Node)
+    name := cls.value
+    c_type_name := cg.extern_info.type_c_type(name)
+    c_dtor := cg.extern_info.type_c_dtor(name)
+
+    # Destructor
+    cg.w(format("static void __lang_rt_class_{}_dtor(void* obj) ", name) + "{")
+    cg.ind += 1
+    cg.w(format("__lang_rt_Class_{}* self = (__lang_rt_Class_{}*)obj;", name, name))
+    if len(c_dtor) > 0
+        cg.w(format("if (self->ptr) {}(self->ptr);", c_dtor))
+    end
+    cg.w("free(self);")
+    cg.ind -= 1
+    cg.w("}")
+    cg.w_empty()
+
+    # Retain / Release
+    cg.w(format("static void __lang_rt_class_{}_retain(__lang_rt_Class_{}* o) ", name, name) + "{ __lang_rt_retain(o); }")
+    cg.w(format("static void __lang_rt_class_{}_release(__lang_rt_Class_{}* o) ", name, name) + "{ __lang_rt_release(o, __lang_rt_class_" + name + "_dtor); }")
+    cg.w_empty()
+
+    # Wrap
+    cg.w(format("static __lang_rt_Class_{}* __lang_rt_extern_{}_wrap({}* ptr) ", name, name, c_type_name) + "{")
+    cg.ind += 1
+    cg.w(format("__lang_rt_Class_{}* obj = (__lang_rt_Class_{}*)malloc(sizeof(__lang_rt_Class_{}));", name, name, name))
+    cg.w("__lang_rt_rc_init(&obj->rc);")
+    cg.w("obj->ptr = ptr;")
+    cg.w("return obj;")
+    cg.ind -= 1
+    cg.w("}")
+    cg.w_empty()
+end
+

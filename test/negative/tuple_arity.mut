@@ -1,0 +1,6 @@
+# ERROR: tuple destructuring with wrong arity
+def get_pair() -> (i64, str)
+    return (42, "hello")
+end
+
+a, b, c := get_pair()

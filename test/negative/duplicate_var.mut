@@ -1,0 +1,3 @@
+# Negative: declare variable twice in same scope
+x: i64 = 10
+x: i64 = 20

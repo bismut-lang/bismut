@@ -1,0 +1,156 @@
+# diag.mut — Pretty error diagnostic formatter
+#
+# Shows source context around errors with line numbers and underline carets.
+#
+# Usage:
+#   import langtools.diag
+#   d := diag.Diagnostic("test.mut", source_string)
+#   msg := d.error(12, 5, 3, "unknown variable 'foo'")
+#   print(msg)
+#
+# Output:
+#   error: unknown variable 'foo'
+#    --> test.mut:12:5
+#     |
+#   12|     foo = 42
+#     |     ^^^ not found in scope
+
+extern string
+extern stringbuilder
+
+# ─── Get the N-th line from source (1-based) ─────────────────────────
+
+def get_line(source: str, line_num: i64) -> str
+    cur: i64 = 1
+    start: i64 = 0
+    i: i64 = 0
+    slen := len(source)
+    if line_num <= 0
+        return ""
+    end
+    while i < slen
+        if cur == line_num
+            # Find end of this line
+            j := i
+            while j < slen and source[j] != '\n'
+                j += 1
+            end
+            return string.substr(source, i, j - i)
+        end
+        if source[i] == '\n'
+            cur += 1
+        end
+        i += 1
+    end
+    return ""
+end
+
+# ─── Build underline caret string ────────────────────────────────────
+
+def make_caret(col: i64, span: i64, ch: str) -> str
+    sb := stringbuilder.new()
+    i: i64 = 1
+    while i < col
+        stringbuilder.append_str(sb, " ")
+        i += 1
+    end
+    j: i64 = 0
+    actual_span := span
+    if actual_span < 1
+        actual_span = 1
+    end
+    while j < actual_span
+        stringbuilder.append_str(sb, ch)
+        j += 1
+    end
+    return stringbuilder.build(sb)
+end
+
+# ─── Format the line number gutter width ─────────────────────────────
+
+def gutter_width(line_num: i64) -> i64
+    s := string.i64_to_str(line_num)
+    return len(s)
+end
+
+def pad_right(s: str, width: i64) -> str
+    if len(s) >= width
+        return s
+    end
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, s)
+    i := len(s)
+    while i < width
+        stringbuilder.append_str(sb, " ")
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end
+
+# ─── Diagnostic class ────────────────────────────────────────────────
+
+class Diagnostic
+    file: str
+    source: str
+
+    def init(self, file: str, source: str)
+        self.file = file
+        self.source = source
+    end
+
+    def error(self, line: i64, col: i64, span: i64, msg: str) -> str
+        return self._format("error", line, col, span, msg)
+    end
+
+    def warn(self, line: i64, col: i64, span: i64, msg: str) -> str
+        return self._format("warning", line, col, span, msg)
+    end
+
+    def note(self, line: i64, col: i64, span: i64, msg: str) -> str
+        return self._format("note", line, col, span, msg)
+    end
+
+    def _format(self, level: str, line: i64, col: i64, span: i64, msg: str) -> str
+        sb := stringbuilder.new()
+        src_line := get_line(self.source, line)
+        gw := gutter_width(line)
+        gutter_pad := pad_right("", gw)
+        line_str := string.i64_to_str(line)
+
+        # Header: "error: message"
+        stringbuilder.append_str(sb, level)
+        stringbuilder.append_str(sb, ": ")
+        stringbuilder.append_str(sb, msg)
+        stringbuilder.append_str(sb, "\n")
+
+        # Location: " --> file:line:col"
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, gutter_pad)
+        stringbuilder.append_str(sb, "--> ")
+        stringbuilder.append_str(sb, self.file)
+        stringbuilder.append_str(sb, ":")
+        stringbuilder.append_i64(sb, line)
+        stringbuilder.append_str(sb, ":")
+        stringbuilder.append_i64(sb, col)
+        stringbuilder.append_str(sb, "\n")
+
+        # Blank gutter: "  |"
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, gutter_pad)
+        stringbuilder.append_str(sb, "|\n")
+
+        # Source line: "12|     foo = 42"
+        stringbuilder.append_str(sb, line_str)
+        stringbuilder.append_str(sb, "|")
+        stringbuilder.append_str(sb, src_line)
+        stringbuilder.append_str(sb, "\n")
+
+        # Caret line: "  |     ^^^"
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, gutter_pad)
+        stringbuilder.append_str(sb, "|")
+        stringbuilder.append_str(sb, make_caret(col, span, "^"))
+
+        return stringbuilder.build(sb)
+    end
+end

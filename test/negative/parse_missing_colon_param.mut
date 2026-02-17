@@ -1,0 +1,4 @@
+# Negative: missing colon after parameter name
+def foo(x i64) -> i64
+    return x
+end

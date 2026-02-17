@@ -1,0 +1,77 @@
+# Test: class implementing multiple interfaces
+
+interface IPrintable
+    def to_string(self) -> str
+end
+
+interface IMeasurable
+    def size(self) -> i64
+end
+
+class Box : IPrintable, IMeasurable
+    w: i64
+    h: i64
+
+    def init(self, w: i64, h: i64)
+        self.w = w
+        self.h = h
+    end
+
+    def to_string(self) -> str
+        return "Box"
+    end
+
+    def size(self) -> i64
+        return self.w * self.h
+    end
+end
+
+class Tag : IPrintable
+    label: str
+
+    def init(self, label: str)
+        self.label = label
+    end
+
+    def to_string(self) -> str
+        return self.label
+    end
+end
+
+# --- Test 1: assign to each interface independently ---
+b := Box(3, 4)
+p: IPrintable = b
+m: IMeasurable = b
+print(p.to_string())
+print(m.size())
+
+# --- Test 2: function accepting IPrintable ---
+def show(p: IPrintable)
+    print(p.to_string())
+end
+
+show(Box(5, 6))
+show(Tag("hello"))
+
+# --- Test 3: function accepting IMeasurable ---
+def report(m: IMeasurable)
+    print(m.size())
+end
+
+report(Box(7, 8))
+
+# --- Test 4: reassign IPrintable var between different classes ---
+p2: IPrintable = Box(1, 2)
+print(p2.to_string())
+p2 = Tag("world")
+print(p2.to_string())
+
+# --- Test 5: None on both interface types ---
+p3: IPrintable = None
+m3: IMeasurable = None
+if p3 == None
+    print("p3 is None")
+end
+if m3 == None
+    print("m3 is None")
+end

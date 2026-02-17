@@ -1,0 +1,294 @@
+# mutlib.mut -- .mutlib manifest parser and library finder
+#
+# Parses .mutlib manifest files that describe native C plugin libraries.
+# Provides find_lib() to locate libraries and parse_mutlib() to parse manifests.
+
+extern string
+extern stringbuilder
+extern filesystem
+
+import strutils as su
+import pathutils as pu
+
+# ─── Data classes ────────────────────────────────────────────────────
+
+class MutlibFunc
+    bismut_name: str
+    c_name: str
+    param_names: List[str]
+    param_types: List[str]
+    ret_type: str
+    is_dtor: bool
+
+    def init(self, bismut_name: str, c_name: str, ret_type: str, is_dtor: bool)
+        self.bismut_name = bismut_name
+        self.c_name = c_name
+        self.param_names = List[str]()
+        self.param_types = List[str]()
+        self.ret_type = ret_type
+        self.is_dtor = is_dtor
+    end
+end
+
+class MutlibType
+    bismut_name: str
+    c_type: str
+    c_dtor: str
+
+    def init(self, bismut_name: str, c_type: str)
+        self.bismut_name = bismut_name
+        self.c_type = c_type
+        self.c_dtor = ""
+    end
+end
+
+class MutlibConst
+    bismut_name: str
+    ty: str
+    c_expr: str
+
+    def init(self, bismut_name: str, ty: str, c_expr: str)
+        self.bismut_name = bismut_name
+        self.ty = ty
+        self.c_expr = c_expr
+    end
+end
+
+class MutlibData
+    types: List[MutlibType]
+    funcs: List[MutlibFunc]
+    consts: List[MutlibConst]
+    c_source: str
+    cflags: List[str]
+    ldflags: List[str]
+
+    def init(self)
+        self.types = List[MutlibType]()
+        self.funcs = List[MutlibFunc]()
+        self.consts = List[MutlibConst]()
+        self.c_source = ""
+        self.cflags = List[str]()
+        self.ldflags = List[str]()
+    end
+end
+
+# ─── Internal parsing helpers ────────────────────────────────────────
+
+def _rfind(s: str, sub: str) -> i64
+    slen := len(s)
+    sublen := len(sub)
+    i := slen - sublen
+    while i >= 0
+        if string.substr(s, i, sublen) == sub
+            return i
+        end
+        i -= 1
+    end
+    return -1
+end
+
+def _parse_func(line: str) -> MutlibFunc
+    # Format: bismut_name(p1: type, p2: type) -> ret_type = c_name
+    # Or:     bismut_name(p1: type) [dtor] = c_name
+    eq_pos := _rfind(line, "=")
+    sig := su.trim(string.substr(line, 0, eq_pos))
+    c_name := su.trim(string.substr(line, eq_pos + 1, len(line) - eq_pos - 1))
+
+    paren := string.find(sig, "(")
+    bismut_name := su.trim(string.substr(sig, 0, paren))
+    rest := string.substr(sig, paren + 1, len(sig) - paren - 1)
+
+    close := string.find(rest, ")")
+    params_str := su.trim(string.substr(rest, 0, close))
+    after := su.trim(string.substr(rest, close + 1, len(rest) - close - 1))
+
+    is_dtor := su.contains(after, "[dtor]")
+    if is_dtor
+        after = su.trim(su.replace(after, "[dtor]", ""))
+    end
+
+    ret_type := "void"
+    if su.starts_with(after, "->")
+        ret_type = su.trim(string.substr(after, 2, len(after) - 2))
+    end
+
+    f := MutlibFunc(bismut_name, c_name, ret_type, is_dtor)
+
+    if len(params_str) > 0
+        params := su.split(params_str, ",")
+        i: i64 = 0
+        while i < len(params)
+            p := su.trim(params[i])
+            colon := string.find(p, ":")
+            pname := su.trim(string.substr(p, 0, colon))
+            pty := su.trim(string.substr(p, colon + 1, len(p) - colon - 1))
+            append(f.param_names, pname)
+            append(f.param_types, pty)
+            i += 1
+        end
+    end
+
+    return f
+end
+
+def _parse_type(line: str) -> MutlibType
+    # Format: BismutName = c_type
+    eq_pos := string.find(line, "=")
+    bismut_name := su.trim(string.substr(line, 0, eq_pos))
+    c_type := su.trim(string.substr(line, eq_pos + 1, len(line) - eq_pos - 1))
+    return MutlibType(bismut_name, c_type)
+end
+
+def _parse_const(line: str) -> MutlibConst
+    # Format: NAME: type = c_expression
+    eq_pos := string.find(line, "=")
+    decl := su.trim(string.substr(line, 0, eq_pos))
+    c_expr := su.trim(string.substr(line, eq_pos + 1, len(line) - eq_pos - 1))
+    colon := string.find(decl, ":")
+    name := su.trim(string.substr(decl, 0, colon))
+    ty := su.trim(string.substr(decl, colon + 1, len(decl) - colon - 1))
+    return MutlibConst(name, ty, c_expr)
+end
+
+def _split_and_append(target: List[str], value: str)
+    parts := su.split(value, " ")
+    j: i64 = 0
+    while j < len(parts)
+        if len(parts[j]) > 0
+            append(target, parts[j])
+        end
+        j += 1
+    end
+end
+
+def _resolve_flags(fkeys: List[str], fvals: List[str], data: MutlibData, target_plat: str)
+    @if __LINUX__
+    plat: str = "linux"
+    @elif __MACOS__
+    plat: str = "macos"
+    @elif __WIN__
+    plat: str = "win"
+    @else
+    plat: str = "linux"
+    @end
+    if len(target_plat) > 0
+        plat = target_plat
+    end
+
+    i: i64 = 0
+    while i < len(fkeys)
+        k := fkeys[i]
+        v := fvals[i]
+        if k == "cflags" or k == string.concat("cflags_", plat)
+            _split_and_append(data.cflags, v)
+        elif k == "ldflags" or k == string.concat("ldflags_", plat)
+            _split_and_append(data.ldflags, v)
+        end
+        i += 1
+    end
+end
+
+def _link_dtors(data: MutlibData)
+    type_by_name: Dict[str, MutlibType] = Dict[str, MutlibType]()
+    i: i64 = 0
+    while i < len(data.types)
+        type_by_name[data.types[i].bismut_name] = data.types[i]
+        i += 1
+    end
+
+    i = 0
+    while i < len(data.funcs)
+        f := data.funcs[i]
+        if f.is_dtor and len(f.param_types) > 0
+            first_ty := f.param_types[0]
+            if has(type_by_name, first_ty)
+                type_by_name[first_ty].c_dtor = f.c_name
+            end
+        end
+        i += 1
+    end
+end
+
+# ─── Public API ──────────────────────────────────────────────────────
+
+def parse_mutlib(path: str, lib_name: str, lib_dir: str, target_plat: str) -> MutlibData
+    content := filesystem.read(path)
+    lines := su.split(content, "\n")
+    data := MutlibData()
+    section := ""
+    flag_keys: List[str] = List[str]()
+    flag_vals: List[str] = List[str]()
+
+    i: i64 = 0
+    while i < len(lines)
+        line := su.trim(lines[i])
+        i += 1
+
+        if len(line) == 0 or line[0] == '#'
+            continue
+        end
+
+        if line[0] == '[' and line[len(line) - 1] == ']'
+            section = su.trim(string.substr(line, 1, len(line) - 2))
+            continue
+        end
+
+        if section == "types"
+            append(data.types, _parse_type(line))
+        elif section == "functions"
+            append(data.funcs, _parse_func(line))
+        elif section == "constants"
+            append(data.consts, _parse_const(line))
+        elif section == "flags"
+            eq := string.find(line, "=")
+            if eq >= 0
+                k := su.trim(string.substr(line, 0, eq))
+                v := su.trim(string.substr(line, eq + 1, len(line) - eq - 1))
+                append(flag_keys, k)
+                append(flag_vals, v)
+            end
+        end
+    end
+
+    # C source file
+    c_path := pu.path_join(lib_dir, string.concat(lib_name, ".c"))
+    if filesystem.exists(c_path)
+        data.c_source = c_path
+    end
+
+    _resolve_flags(flag_keys, flag_vals, data, target_plat)
+
+    # Substitute {LIB_DIR} in flag values
+    fi: i64 = 0
+    while fi < len(data.cflags)
+        data.cflags[fi] = su.replace(data.cflags[fi], "{LIB_DIR}", lib_dir)
+        fi += 1
+    end
+    fi = 0
+    while fi < len(data.ldflags)
+        data.ldflags[fi] = su.replace(data.ldflags[fi], "{LIB_DIR}", lib_dir)
+        fi += 1
+    end
+
+    _link_dtors(data)
+
+    return data
+end
+
+def find_lib(lib_name: str, src_file: str, compiler_dir: str) -> str
+    # Returns abs path to lib dir, or "" if not found
+    src_dir := pu.path_dir(src_file)
+    # 1) libs/ relative to source file
+    d1 := pu.path_normalize(pu.path_join(pu.path_join(src_dir, "libs"), lib_name))
+    p1 := pu.path_join(d1, string.concat(lib_name, ".mutlib"))
+    if filesystem.exists(p1)
+        return d1
+    end
+    # 2) libs/ relative to compiler
+    d2 := pu.path_normalize(pu.path_join(pu.path_join(compiler_dir, "libs"), lib_name))
+    p2 := pu.path_join(d2, string.concat(lib_name, ".mutlib"))
+    if filesystem.exists(p2)
+        return d2
+    end
+    return ""
+end

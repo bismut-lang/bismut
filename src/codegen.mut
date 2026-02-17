@@ -1,0 +1,781 @@
+# codegen.mut -- Orchestrator for C code generation
+#
+# generate_c(program, file, extern_info) -> str
+# Walks the PROGRAM AST, collects types, emits everything in order.
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import parser as mp
+import strutils as su
+import cg_types as ct
+import type_utils as tu
+import cg_state as cs
+import cg_emit as ce
+import cg_expr as cx
+import cg_stmt as cst
+import import_resolver as ir
+
+# ─── Type collection from AST ───────────────────────────────────────
+
+def _collect_expr_types(cg: cs.CodeGen, e: pars.Node)
+    k := e.kind
+
+    if k == mp.NodeKind.INT_LIT or k == mp.NodeKind.FLOAT_LIT or k == mp.NodeKind.STRING_LIT or k == mp.NodeKind.CHAR_LIT or k == mp.NodeKind.BOOL_LIT or k == mp.NodeKind.NONE_LIT or k == mp.NodeKind.IDENT
+        return
+    end
+
+    if k == mp.NodeKind.IS or k == mp.NodeKind.AS
+        _collect_expr_types(cg, e.child(0))
+        return
+    end
+
+    if k == mp.NodeKind.UNARY
+        _collect_expr_types(cg, e.child(0))
+        return
+    end
+
+    if k == mp.NodeKind.BINARY
+        _collect_expr_types(cg, e.child(0))
+        _collect_expr_types(cg, e.child(1))
+        return
+    end
+
+    if k == mp.NodeKind.MEMBER
+        if e.child_count() > 0
+            obj := e.child(0)
+            if obj.kind == mp.NodeKind.IDENT and ct.is_enum(obj.value)
+                return
+            end
+            _collect_expr_types(cg, obj)
+        end
+        return
+    end
+
+    if k == mp.NodeKind.INDEX
+        _collect_expr_types(cg, e.child(0))
+        _collect_expr_types(cg, e.child(1))
+        return
+    end
+
+    if k == mp.NodeKind.CALL
+        # Detect range/keys for pre-registration
+        if e.child_count() > 0
+            callee := e.child(0)
+            if callee.kind == mp.NodeKind.IDENT
+                if callee.value == "range"
+                    cg.used_list_tags["I64"] = 1
+                elif callee.value == "keys"
+                    cg.used_list_tags["STR"] = 1
+                end
+            end
+        end
+        # Generic ops: register from type_param
+        if len(e.value) > 0
+            if e.child_count() > 0
+                callee := e.child(0)
+                if callee.kind == mp.NodeKind.IDENT
+                    nm := callee.value
+                    if nm == "List" or nm == "append" or nm == "get" or nm == "set" or nm == "pop" or nm == "remove"
+                        tag := ct.elem_tag(e.value)
+                        cg.used_list_tags[tag] = 1
+                    elif nm == "Dict" or nm == "put" or nm == "lookup" or nm == "has"
+                        combined := ct.dict_combined_tag_from_inner(e.value)
+                        cg.used_dict_tags[combined] = 1
+                    end
+                end
+            end
+            cg.mark_type_use(e.value)
+        end
+        # Recurse into callee + args
+        i: i64 = 0
+        while i < e.child_count()
+            _collect_expr_types(cg, e.child(i))
+            i += 1
+        end
+        return
+    end
+
+    if k == mp.NodeKind.TUPLE_EXPR
+        i: i64 = 0
+        while i < e.child_count()
+            _collect_expr_types(cg, e.child(i))
+            i += 1
+        end
+        return
+    end
+
+    if k == mp.NodeKind.LIST_LIT
+        tag := ct.elem_tag(e.value)
+        cg.used_list_tags[tag] = 1
+        cg.mark_type_use(e.value)
+        i: i64 = 0
+        while i < e.child_count()
+            _collect_expr_types(cg, e.child(i))
+            i += 1
+        end
+        return
+    end
+
+    if k == mp.NodeKind.DICT_LIT
+        combined := ct.dict_combined_tag_from_inner(e.value)
+        cg.used_dict_tags[combined] = 1
+        cg.mark_type_use(e.value)
+        i: i64 = 0
+        while i < e.child_count()
+            _collect_expr_types(cg, e.child(i))
+            i += 1
+        end
+        return
+    end
+end
+
+def _collect_stmt_types(cg: cs.CodeGen, st: pars.Node)
+    k := st.kind
+
+    if k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL or k == mp.NodeKind.STATIC_DECL
+        # Type from annotation
+        if st.child_count() == 2
+            ty := tu.type_node_to_str(st.child(0))
+            cg.mark_type_use(ty)
+            _collect_expr_types(cg, st.child(1))
+        elif st.child_count() == 1
+            if st.ty != None and len(st.ty) > 0
+                cg.mark_type_use(st.ty)
+            end
+            _collect_expr_types(cg, st.child(0))
+        end
+        return
+    end
+
+    if k == mp.NodeKind.ASSIGN
+        _collect_expr_types(cg, st.child(1))
+        return
+    end
+
+    if k == mp.NodeKind.MEMBER_ASSIGN
+        _collect_expr_types(cg, st.child(0).child(0))
+        _collect_expr_types(cg, st.child(1))
+        return
+    end
+
+    if k == mp.NodeKind.INDEX_ASSIGN
+        _collect_expr_types(cg, st.child(0))
+        _collect_expr_types(cg, st.child(1))
+        _collect_expr_types(cg, st.child(2))
+        return
+    end
+
+    if k == mp.NodeKind.EXPR_STMT
+        _collect_expr_types(cg, st.child(0))
+        return
+    end
+
+    if k == mp.NodeKind.RETURN
+        if st.child_count() > 0
+            _collect_expr_types(cg, st.child(0))
+        end
+        return
+    end
+
+    if k == mp.NodeKind.IF
+        i: i64 = 0
+        while i < st.child_count()
+            arm := st.child(i)
+            if arm.value == "else"
+                _collect_block_types(cg, arm.child(0))
+            else
+                _collect_expr_types(cg, arm.child(0))
+                _collect_block_types(cg, arm.child(1))
+            end
+            i += 1
+        end
+        return
+    end
+
+    if k == mp.NodeKind.WHILE
+        _collect_expr_types(cg, st.child(0))
+        _collect_block_types(cg, st.child(1))
+        return
+    end
+
+    if k == mp.NodeKind.FOR
+        # children: [TYPE, iterable, body]
+        var_ty := tu.type_node_to_str(st.child(0))
+        cg.mark_type_use(var_ty)
+        _collect_expr_types(cg, st.child(1))
+        _collect_block_types(cg, st.child(2))
+        return
+    end
+
+    if k == mp.NodeKind.BLOCK
+        _collect_block_types(cg, st)
+        return
+    end
+
+    if k == mp.NodeKind.TUPLE_DESTRUCT
+        nch := st.child_count()
+        _collect_expr_types(cg, st.child(nch - 1))
+        return
+    end
+end
+
+def _collect_block_types(cg: cs.CodeGen, block: pars.Node)
+    i: i64 = 0
+    while i < block.child_count()
+        _collect_stmt_types(cg, block.child(i))
+        i += 1
+    end
+end
+
+# ─── Registration helpers ───────────────────────────────────────────
+
+def _register_types(cg: cs.CodeGen, prog: pars.Node)
+    # Walk PROGRAM children and register classes, structs, interfaces, enums
+    i: i64 = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        k := ch.kind
+
+        if k == mp.NodeKind.INTERFACE_DECL
+            cg.iface_defs[ch.value] = ch
+            ct.register_iface(ch.value)
+        end
+
+        if k == mp.NodeKind.ENUM_DECL
+            ct.register_enum(ch.value)
+            variants := Dict[str, i64]()
+            j: i64 = 0
+            while j < ch.child_count()
+                v := ch.child(j)
+                if v.kind == mp.NodeKind.ENUM_VARIANT
+                    # v.ty holds the resolved integer value from the typechecker
+                    variants[v.value] = string.str_to_i64(v.ty)
+                end
+                j += 1
+            end
+            cg.enum_variants[ch.value] = variants
+        end
+
+        if k == mp.NodeKind.CLASS_DECL
+            cg.class_defs[ch.value] = ch
+            ct.register_class(ch.value)
+            # Collect implements list
+            sb := stringbuilder.new()
+            first := True
+            j: i64 = 0
+            while j < ch.child_count()
+                c := ch.child(j)
+                if c.kind == mp.NodeKind.TYPE
+                    if not first
+                        stringbuilder.append_str(sb, ",")
+                    end
+                    stringbuilder.append_str(sb, c.value)
+                    first = False
+                end
+                j += 1
+            end
+            cg.class_implements[ch.value] = stringbuilder.build(sb)
+        end
+
+        if k == mp.NodeKind.STRUCT_DECL
+            cg.struct_defs[ch.value] = ch
+            ct.register_struct(ch.value)
+        end
+
+        i += 1
+    end
+end
+
+def _build_func_sigs(cg: cs.CodeGen, prog: pars.Node)
+    # Build function signature table for user functions
+    i: i64 = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.FUNC_DECL
+            # Skip generic templates (have TYPE_PARAM children before params)
+            if tu.func_type_param_count(ch) > 0
+                i += 1
+                continue
+            end
+            # Build "p1,p2,...|ret"
+            pb := tu.func_params_block(ch)
+            sb := stringbuilder.new()
+            j: i64 = 0
+            while j < pb.child_count()
+                if j > 0
+                    stringbuilder.append_str(sb, ",")
+                end
+                p := pb.child(j)
+                stringbuilder.append_str(sb, tu.type_node_to_str(p.child(0)))
+                j += 1
+            end
+            stringbuilder.append_str(sb, "|")
+            stringbuilder.append_str(sb, tu.func_ret_type_str(ch))
+            cg.func_sigs[ch.value] = stringbuilder.build(sb)
+        end
+        i += 1
+    end
+end
+
+def _collect_decl_types(cg: cs.CodeGen, decl: pars.Node)
+    j: i64 = 0
+    while j < decl.child_count()
+        c := decl.child(j)
+        if c.kind == mp.NodeKind.FIELD_DECL
+            cg.mark_type_use(tu.type_node_to_str(c.child(0)))
+        elif c.kind == mp.NodeKind.FUNC_DECL
+            ret := tu.func_ret_type_str(c)
+            cg.mark_type_use(ret)
+            pb := tu.func_params_block(c)
+            m: i64 = 0
+            while m < pb.child_count()
+                p := pb.child(m)
+                if p.value != "self"
+                    cg.mark_type_use(tu.type_node_to_str(p.child(0)))
+                end
+                m += 1
+            end
+            body := tu.func_body(c)
+            _collect_block_types(cg, body)
+        end
+        j += 1
+    end
+end
+
+def _collect_all_types(cg: cs.CodeGen, prog: pars.Node)
+    i: i64 = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        k := ch.kind
+
+        if k == mp.NodeKind.FUNC_DECL
+            if tu.func_type_param_count(ch) == 0
+                # Collect param + return types
+                ret := tu.func_ret_type_str(ch)
+                cg.mark_type_use(ret)
+                pb := tu.func_params_block(ch)
+                j: i64 = 0
+                while j < pb.child_count()
+                    p := pb.child(j)
+                    cg.mark_type_use(tu.type_node_to_str(p.child(0)))
+                    j += 1
+                end
+                # Collect from body
+                body := tu.func_body(ch)
+                _collect_block_types(cg, body)
+            end
+        end
+
+        if k == mp.NodeKind.CLASS_DECL or k == mp.NodeKind.STRUCT_DECL
+            _collect_decl_types(cg, ch)
+        end
+
+        # Top-level statements (program body)
+        if k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL or k == mp.NodeKind.ASSIGN or k == mp.NodeKind.MEMBER_ASSIGN or k == mp.NodeKind.INDEX_ASSIGN or k == mp.NodeKind.EXPR_STMT or k == mp.NodeKind.RETURN or k == mp.NodeKind.IF or k == mp.NodeKind.WHILE or k == mp.NodeKind.FOR or k == mp.NodeKind.BLOCK or k == mp.NodeKind.TUPLE_DESTRUCT
+            _collect_stmt_types(cg, ch)
+        end
+
+        i += 1
+    end
+end
+
+# ─── Global variable emission ───────────────────────────────────────
+
+def _emit_global_vars(cg: cs.CodeGen, prog: pars.Node)
+    # Push global scope for file-scope variables
+    cg.push_scope()
+    i: i64 = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.VAR_DECL or ch.kind == mp.NodeKind.CONST_DECL
+            name := ch.value
+            # Skip extern constants
+            if has(cg.extern_info.constants, name)
+                i += 1
+                continue
+            end
+            # Typed: 2 children [TYPE, init_expr]
+            ty: str = ""
+            if ch.child_count() == 2
+                ty = tu.type_node_to_str(ch.child(0))
+            else
+                ty = ch.ty
+            end
+            ct_str := ct.c_type(ty)
+            cg.mark_type_use(ty)
+            vi := cg.declare_var(name, ty)
+            if ct.is_ref_type(ty) or ct.is_iface(ty) or ct.is_struct(ty)
+                cg.w(format("static {} {} = {{0}};", ct_str, vi.c_name))
+            else
+                cg.w(format("static {} {} = 0;", ct_str, vi.c_name))
+            end
+        end
+        i += 1
+    end
+    cg.w_empty()
+end
+
+# ─── Helper: find Bismut name for a C name in a scope ───────────────
+
+def _find_bismut_name(cg: cs.CodeGen, scope_idx: i64, c_name: str) -> str
+    for k: str in keys(cg.env[scope_idx])
+        vi := cg.env[scope_idx][k]
+        if vi.c_name == c_name
+            return k
+        end
+    end
+    return ""
+end
+
+# ─── Program body + main ────────────────────────────────────────────
+
+def _emit_program(cg: cs.CodeGen, prog: pars.Node)
+    cg.w("static void __lang_rt_program(void) {")
+    cg.ind += 1
+
+    # In debug mode, emit local declarations for globals not referenced
+    # by user functions. This shadows the file-scope static so GDB shows
+    # them in the Locals panel.
+    if cg.debug_lines
+        j: i64 = 0
+        while j < cg.global_scope_depth
+            scope := cg.scope_vars[j]
+            m: i64 = 0
+            while m < len(scope)
+                v := scope[m]
+                # Find the Bismut name for this variable
+                bname := _find_bismut_name(cg, j, v.c_name)
+                if len(bname) > 0 and not has(cg.func_global_refs, bname)
+                    ct_str := ct.c_type(v.ty)
+                    if ct.is_ref_type(v.ty) or ct.is_iface(v.ty) or ct.is_struct(v.ty)
+                        cg.w(format("{} {} = {{0}};", ct_str, v.c_name))
+                    else
+                        cg.w(format("{} {} = 0;", ct_str, v.c_name))
+                    end
+                end
+                m += 1
+            end
+            j += 1
+        end
+    end
+
+    i: i64 = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        k := ch.kind
+
+        if k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL
+            name := ch.value
+            if has(cg.extern_info.constants, name)
+                i += 1
+                continue
+            end
+            # Set source location for #line emission on global var init
+            if cg.debug_lines and ch.line > 0
+                src_file := ch.file
+                if src_file == "" or src_file == None
+                    src_file = cg.file
+                end
+                if len(src_file) > 0
+                    cg.cur_debug_line = ch.line
+                    cg.cur_debug_file = src_file
+                end
+            end
+            # Already declared at file scope — just emit assignment
+            vi := cg.lookup(name)
+            src := cg.src(ch)
+            ty: str = ""
+            init_idx: i64 = 0
+            if ch.child_count() == 2
+                ty = tu.type_node_to_str(ch.child(0))
+                init_idx = 1
+            else
+                ty = ch.ty
+            end
+            expr_c, expr_ty := cx.emit_expr(cg, ch.child(init_idx))
+            expr_c = cg.maybe_wrap_iface(expr_c, expr_ty, ty)
+            cg.w(format("{} = {};", vi.c_name, expr_c))
+            if ct.is_ref_type(ty) and cs.expr_is_borrowed(ch.child(ch.child_count() - 1))
+                cg.emit_retain_value(ty, vi.c_name, src)
+            end
+            cg.flush_pending_releases(src)
+        elif k == mp.NodeKind.FUNC_DECL or k == mp.NodeKind.CLASS_DECL or k == mp.NodeKind.STRUCT_DECL or k == mp.NodeKind.INTERFACE_DECL or k == mp.NodeKind.ENUM_DECL or k == mp.NodeKind.IMPORT or k == mp.NodeKind.EXTERN
+            # Declarations — skip in program body
+            i += 1
+            continue
+        else
+            cst.emit_stmt(cg, ch, False, False)
+        end
+        i += 1
+    end
+
+    # Clear debug location before cleanup code
+    cg.cur_debug_line = 0
+    cg.cur_debug_file = ""
+
+    # Release global ref-type variables at program exit
+    j: i64 = 0
+    while j < cg.global_scope_depth
+        scope := cg.scope_vars[j]
+        m := len(scope) - 1
+        while m >= 0
+            v := scope[m]
+            if ct.is_ref_type(v.ty)
+                cg.emit_release(v, "\"global cleanup\"")
+            end
+            m -= 1
+        end
+        j += 1
+    end
+
+    cg.ind -= 1
+    cg.w("}")
+end
+
+def _emit_main(cg: cs.CodeGen)
+    cg.w("int main(int argc, char** argv) {")
+    cg.ind += 1
+    cg.w("__lang_rt_argc_ = argc;")
+    cg.w("__lang_rt_argv_ = argv;")
+    cg.w("__lang_rt_program();")
+    cg.w("return 0;")
+    cg.ind -= 1
+    cg.w("}")
+end
+
+# ─── Splice string literal statics ─────────────────────────────────
+
+def _splice_string_lits(cg: cs.CodeGen)
+    if len(cg.string_lits) == 0
+        return
+    end
+    lit_lines: List[str] = List[str]()
+    for k: str in keys(cg.string_lits)
+        var_name := cg.string_lits[k]
+        append(lit_lines, format("__LANG_RT_STR_LIT({}, {});", var_name, k))
+    end
+    append(lit_lines, "")
+
+    # Insert at reserved position
+    pos := cg.string_lit_insert_pos
+    # Build new out list with lit_lines spliced in
+    new_out: List[str] = List[str]()
+    i: i64 = 0
+    while i < pos
+        append(new_out, cg.out[i])
+        i += 1
+    end
+    j: i64 = 0
+    while j < len(lit_lines)
+        append(new_out, lit_lines[j])
+        j += 1
+    end
+    while i < len(cg.out)
+        append(new_out, cg.out[i])
+        i += 1
+    end
+    cg.out = new_out
+end
+
+# ─── Main entry point ───────────────────────────────────────────────
+
+def generate_c(prog: pars.Node, file: str, extern_info: ir.ExternInfo, debug_lines: bool) -> str
+    # Clear global type registries
+    ct.clear_registries()
+
+    cg := cs.CodeGen()
+    cg.file = file
+    cg.extern_info = extern_info
+    cg.debug_lines = debug_lines
+
+    # Register all types
+    _register_types(cg, prog)
+    _build_func_sigs(cg, prog)
+    _collect_all_types(cg, prog)
+
+    # ---- Emit C ----
+    ce.emit_prelude(cg)
+    cg.w_empty()
+
+    # Reserve position for string literal statics
+    cg.string_lit_insert_pos = len(cg.out)
+
+    # Extern library includes
+    i: i64 = 0
+    while i < len(cg.extern_info.includes)
+        cg.w(format("#include \"{}\"", cg.extern_info.includes[i]))
+        i += 1
+    end
+    if len(cg.extern_info.includes) > 0
+        cg.w_empty()
+    end
+
+    # Function pointer typedefs
+    ce.emit_fn_typedefs(cg)
+
+    # Class forward typedefs
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.CLASS_DECL
+            cg.w(format("typedef struct __lang_rt_Class_{} __lang_rt_Class_{};", ch.value, ch.value))
+        end
+        i += 1
+    end
+    cg.w_empty()
+
+    # Interface vtable structs and fat pointer types
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.INTERFACE_DECL
+            ce.emit_iface_types(cg, ch)
+        end
+        i += 1
+    end
+    cg.w_empty()
+
+    # Struct typedefs
+    has_structs := False
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.STRUCT_DECL
+            ce.emit_struct_typedef(cg, ch)
+            has_structs = True
+        end
+        i += 1
+    end
+    if has_structs
+        cg.w_empty()
+    end
+
+    # Container instantiations
+    ce.emit_container_instantiations(cg)
+    cg.w_empty()
+
+    # Tuple typedefs
+    ce.emit_tuple_typedefs(cg)
+
+    # Class struct definitions
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.CLASS_DECL
+            ce.emit_class_struct(cg, ch)
+        end
+        i += 1
+    end
+    cg.w_empty()
+
+    # Function prototypes
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.FUNC_DECL and tu.func_type_param_count(ch) == 0
+            cg.w(ce.fn_proto(cg, ch) + ";")
+        end
+        i += 1
+    end
+    cg.w_empty()
+
+    # Global variables
+    _emit_global_vars(cg, prog)
+    cg.global_scope_depth = len(cg.scope_vars)
+
+    # Class methods (constructor, destructor, retain/release, user methods)
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.CLASS_DECL
+            cst.emit_class_methods(cg, ch)
+        end
+        i += 1
+    end
+    cg.w_empty()
+
+    # Struct methods
+    has_struct_methods := False
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.STRUCT_DECL
+            j: i64 = 0
+            while j < ch.child_count()
+                m := ch.child(j)
+                if m.kind == mp.NodeKind.FUNC_DECL
+                    cst.emit_method(cg, ch, m, True)
+                    has_struct_methods = True
+                end
+                j += 1
+            end
+        end
+        i += 1
+    end
+    if has_struct_methods
+        cg.w_empty()
+    end
+
+    # Interface vtable instances
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.CLASS_DECL and has(cg.class_implements, ch.value)
+            impl_str := cg.class_implements[ch.value]
+            if len(impl_str) > 0
+                inames := su.split(impl_str, ",")
+                j: i64 = 0
+                while j < len(inames)
+                    iname := inames[j]
+                    if has(cg.iface_defs, iname)
+                        ce.emit_vtable_instance(cg, ch, cg.iface_defs[iname])
+                    end
+                    j += 1
+                end
+            end
+        end
+        i += 1
+    end
+    cg.w_empty()
+
+    # Function bodies
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.FUNC_DECL and tu.func_type_param_count(ch) == 0
+            # Check if extern (synthetic functions have ty = c_name)
+            if ch.ty != None and len(ch.ty) > 0
+                ce.emit_extern_wrapper(cg, ch)
+            else
+                cst.emit_function(cg, ch)
+            end
+            cg.w_empty()
+        end
+        i += 1
+    end
+
+    # Program body + main
+    _emit_program(cg, prog)
+    cg.w_empty()
+
+    # Pop global scope
+    pop(cg.env)
+    pop(cg.scope_vars)
+
+    _emit_main(cg)
+
+    # Splice interned string literal statics
+    _splice_string_lits(cg)
+
+    # Join output
+    sb := stringbuilder.new()
+    i = 0
+    while i < len(cg.out)
+        stringbuilder.append_str(sb, cg.out[i])
+        stringbuilder.append_str(sb, "\n")
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end

@@ -1,0 +1,415 @@
+# Test: advanced interface scenarios
+# Interfaces in List/Dict, as class fields, multi-interface is/as
+
+# --- Interface & class definitions ---
+
+interface IShape
+    def area(self) -> i64
+    def name(self) -> str
+end
+
+interface IDrawable
+    def draw(self) -> str
+end
+
+class Circle : IShape, IDrawable
+    r: i64
+
+    def init(self, r: i64)
+        self.r = r
+    end
+
+    def area(self) -> i64
+        return self.r * self.r * 3
+    end
+
+    def name(self) -> str
+        return "Circle"
+    end
+
+    def draw(self) -> str
+        return "drawing circle"
+    end
+end
+
+class Rect : IShape, IDrawable
+    w: i64
+    h: i64
+
+    def init(self, w: i64, h: i64)
+        self.w = w
+        self.h = h
+    end
+
+    def area(self) -> i64
+        return self.w * self.h
+    end
+
+    def name(self) -> str
+        return "Rect"
+    end
+
+    def draw(self) -> str
+        return "drawing rect"
+    end
+end
+
+class Triangle : IShape
+    b: i64
+    h: i64
+
+    def init(self, b: i64, h: i64)
+        self.b = b
+        self.h = h
+    end
+
+    def area(self) -> i64
+        return self.b * self.h / 2
+    end
+
+    def name(self) -> str
+        return "Triangle"
+    end
+end
+
+# ============================================
+# 1. List[IShape] — iterate, dispatch, downcast
+# ============================================
+shapes: List[IShape] = List[IShape]()
+append(shapes, Circle(5))
+append(shapes, Rect(3, 4))
+append(shapes, Triangle(6, 8))
+
+for s:IShape in shapes
+    print(s.name())
+    print(s.area())
+end
+# Circle 75 Rect 12 Triangle 24
+
+# ============================================
+# 2. Downcast from List[IShape]
+# ============================================
+for s2:IShape in shapes
+    if s2 is Circle
+        c: Circle = s2 as Circle
+        print(c.r)
+    end
+    if s2 is Rect
+        r: Rect = s2 as Rect
+        print(r.w)
+        print(r.h)
+    end
+    if s2 is Triangle
+        t: Triangle = s2 as Triangle
+        print(t.b)
+        print(t.h)
+    end
+end
+# 5 3 4 6 8
+
+# ============================================
+# 3. List[IDrawable] — second interface
+# ============================================
+drawables: List[IDrawable] = List[IDrawable]()
+append(drawables, Circle(1))
+append(drawables, Rect(2, 3))
+
+for d:IDrawable in drawables
+    print(d.draw())
+end
+# drawing circle, drawing rect
+
+# ============================================
+# 4. is/as on multi-interface class via IShape
+# ============================================
+s3: IShape = Circle(10)
+if s3 is Circle
+    print("s3 is Circle")
+end
+if s3 is Rect
+    print("WRONG1")
+end
+if s3 is Triangle
+    print("WRONG2")
+end
+
+# ============================================
+# 5. is/as on multi-interface class via IDrawable
+# ============================================
+d2: IDrawable = Rect(7, 8)
+if d2 is Rect
+    r2: Rect = d2 as Rect
+    print(r2.w)
+    print(r2.h)
+end
+if d2 is Circle
+    print("WRONG3")
+end
+
+# ============================================
+# 6. Dict[str, IShape] — store and retrieve
+# ============================================
+shape_map: Dict[str, IShape] = Dict[str, IShape]()
+shape_map["c"] = Circle(9)
+shape_map["r"] = Rect(2, 5)
+
+sc: IShape = shape_map["c"]
+print(sc.name())
+print(sc.area())
+
+sr: IShape = shape_map["r"]
+print(sr.name())
+print(sr.area())
+
+# ============================================
+# 7. Dict[str, IShape] — downcast retrieved value
+# ============================================
+sc2: IShape = shape_map["c"]
+if sc2 is Circle
+    cc: Circle = sc2 as Circle
+    print(cc.r)
+end
+
+sr2: IShape = shape_map["r"]
+if sr2 is Rect
+    rr: Rect = sr2 as Rect
+    print(rr.w)
+    print(rr.h)
+end
+
+# ============================================
+# 8. Interface as class member field
+# ============================================
+class ShapeHolder
+    label: str
+    shape: IShape
+
+    def init(self, label: str, shape: IShape)
+        self.label = label
+        self.shape = shape
+    end
+
+    def describe(self) -> str
+        return self.label
+    end
+end
+
+h1 := ShapeHolder("first", Circle(4))
+print(h1.describe())
+print(h1.shape.name())
+print(h1.shape.area())
+
+h2 := ShapeHolder("second", Rect(6, 7))
+print(h2.describe())
+print(h2.shape.name())
+print(h2.shape.area())
+
+# ============================================
+# 9. Downcast from class member field
+# ============================================
+if h1.shape is Circle
+    mc: Circle = h1.shape as Circle
+    print(mc.r)
+end
+if h2.shape is Rect
+    mr: Rect = h2.shape as Rect
+    print(mr.w)
+    print(mr.h)
+end
+
+# ============================================
+# 10. Reassign interface field to different class
+# ============================================
+h1.shape = Triangle(10, 4)
+print(h1.shape.name())
+print(h1.shape.area())
+if h1.shape is Triangle
+    mt: Triangle = h1.shape as Triangle
+    print(mt.b)
+end
+
+# ============================================
+# 11. None interface field
+# ============================================
+class MaybeShape
+    s: IShape
+
+    def init(self)
+    end
+end
+
+ms := MaybeShape()
+if ms.s == None
+    print("no shape")
+end
+ms.s = Circle(3)
+if ms.s != None
+    print(ms.s.name())
+end
+
+# ============================================
+# 12. Function taking and returning interface
+# ============================================
+def biggest(a: IShape, b: IShape) -> IShape
+    if a.area() > b.area()
+        return a
+    end
+    return b
+end
+
+winner: IShape = biggest(Circle(10), Rect(20, 20))
+print(winner.name())
+print(winner.area())
+
+# ============================================
+# 13. Inline downcast expressions
+# ============================================
+s4: IShape = Circle(8)
+if s4 is Circle and (s4 as Circle).r > 5
+    print("big r")
+end
+
+s5: IShape = Rect(3, 9)
+if s5 is Rect and (s5 as Rect).w * (s5 as Rect).h > 20
+    print("big area")
+end
+
+# ============================================
+# 14. List[IShape] with subscript access
+# ============================================
+shapes2: List[IShape] = List[IShape]()
+append(shapes2, Circle(11))
+append(shapes2, Rect(1, 1))
+
+elem: IShape = shapes2[0]
+print(elem.name())
+if elem is Circle
+    print((elem as Circle).r)
+end
+
+shapes2[1] = Triangle(5, 6)
+elem2: IShape = shapes2[1]
+print(elem2.name())
+if elem2 is Triangle
+    print((elem2 as Triangle).b)
+end
+
+# ============================================
+# 15. Class with multiple interface fields
+# ============================================
+class Canvas
+    fg: IShape
+    bg: IShape
+    tool: IDrawable
+
+    def init(self, fg: IShape, bg: IShape, tool: IDrawable)
+        self.fg = fg
+        self.bg = bg
+        self.tool = tool
+    end
+end
+
+cv := Canvas(Circle(2), Rect(8, 9), Circle(1))
+print(cv.fg.name())
+print(cv.bg.name())
+print(cv.tool.draw())
+
+# Downcast each field
+if cv.fg is Circle
+    print((cv.fg as Circle).r)
+end
+if cv.bg is Rect
+    bgr: Rect = cv.bg as Rect
+    print(bgr.w)
+    print(bgr.h)
+end
+if cv.tool is Circle
+    print("tool is circle")
+end
+
+# ============================================
+# 16. Reassign different interface fields
+# ============================================
+cv.fg = Triangle(3, 6)
+print(cv.fg.name())
+if cv.fg is Triangle
+    print((cv.fg as Triangle).b)
+end
+
+cv.tool = Rect(4, 4)
+print(cv.tool.draw())
+
+# ============================================
+# 17. Class with interface field set to None
+# ============================================
+class Wrapper
+    primary: IShape
+    secondary: IShape
+
+    def init(self, p: IShape)
+        self.primary = p
+    end
+end
+
+wr := Wrapper(Circle(6))
+print(wr.primary.name())
+if wr.secondary == None
+    print("secondary is None")
+end
+
+wr.secondary = Rect(1, 2)
+print(wr.secondary.name())
+print(wr.secondary.area())
+
+# Replace primary, old gets released
+wr.primary = Triangle(5, 10)
+print(wr.primary.name())
+print(wr.primary.area())
+
+# ============================================
+# 18. List of classes that have interface fields
+# ============================================
+holders: List[ShapeHolder] = List[ShapeHolder]()
+append(holders, ShapeHolder("a", Circle(3)))
+append(holders, ShapeHolder("b", Rect(4, 5)))
+append(holders, ShapeHolder("c", Triangle(7, 2)))
+
+for hld:ShapeHolder in holders
+    print(hld.describe())
+    print(hld.shape.area())
+end
+
+# ============================================
+# 19. Downcast interface fields from list elements
+# ============================================
+hld0: ShapeHolder = holders[0]
+if hld0.shape is Circle
+    print((hld0.shape as Circle).r)
+end
+
+hld2: ShapeHolder = holders[2]
+if hld2.shape is Triangle
+    print((hld2.shape as Triangle).h)
+end
+
+# ============================================
+# 20. Dict storing classes with interface fields
+# ============================================
+named: Dict[str, ShapeHolder] = Dict[str, ShapeHolder]()
+named["x"] = ShapeHolder("x-shape", Circle(15))
+named["y"] = ShapeHolder("y-shape", Rect(3, 3))
+
+nx: ShapeHolder = named["x"]
+print(nx.describe())
+print(nx.shape.area())
+if nx.shape is Circle
+    print((nx.shape as Circle).r)
+end
+
+ny: ShapeHolder = named["y"]
+print(ny.describe())
+if ny.shape is Rect
+    nyr: Rect = ny.shape as Rect
+    print(nyr.w)
+    print(nyr.h)
+end

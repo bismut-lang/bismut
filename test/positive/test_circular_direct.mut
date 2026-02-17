@@ -1,0 +1,19 @@
+# test_circular_direct.mut — self-referential class (linked list)
+class Node
+    next: Node
+    val: i64
+
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+a := Node(1)
+b := Node(2)
+c := Node(3)
+a.next = b
+b.next = c
+
+print(a.val)
+print(a.next.val)
+print(a.next.next.val)

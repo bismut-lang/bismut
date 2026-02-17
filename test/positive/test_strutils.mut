@@ -1,0 +1,80 @@
+# test_strutils.mut — Test the strutils module
+import strutils
+
+# ─── Character classification ─────────────────────────────────────────
+
+print(strutils.is_alpha('A'))         # True
+print(strutils.is_alpha('0'))         # False
+print(strutils.is_upper('A'))         # True
+print(strutils.is_upper('a'))         # False
+print(strutils.is_lower('a'))         # True
+print(strutils.is_lower('A'))         # False
+print(strutils.is_digit('0'))         # True
+print(strutils.is_digit('A'))         # False
+print(strutils.is_hex_digit('A'))     # True
+print(strutils.is_hex_digit('G'))     # False
+print(strutils.is_alnum('A'))         # True
+print(strutils.is_alnum('0'))         # True
+print(strutils.is_alnum(' '))         # False
+print(strutils.is_whitespace(' '))    # True
+print(strutils.is_whitespace('\n'))   # False
+print(strutils.is_newline('\n'))      # True
+print(strutils.is_printable('A'))     # True
+print(strutils.is_printable('\n'))    # False
+print(strutils.is_ident_start('_'))   # True
+print(strutils.is_ident_start('0'))   # False
+print(strutils.is_ident_part('_'))    # True
+print(strutils.is_ident_part('0'))    # True
+
+# ─── Character conversion ─────────────────────────────────────────────
+
+print(strutils.to_upper('a'))         # 65
+print(strutils.to_upper('A'))         # 65
+print(strutils.to_lower('A'))         # 97
+print(strutils.to_lower('a'))         # 97
+
+# ─── String predicates ────────────────────────────────────────────────
+
+print(strutils.starts_with("hello world", "hello"))    # True
+print(strutils.starts_with("hello", "world"))          # False
+print(strutils.starts_with("hi", "hello"))             # False
+print(strutils.ends_with("hello world", "world"))      # True
+print(strutils.ends_with("hello", "world"))            # False
+print(strutils.ends_with("hi", "hello"))               # False
+print(strutils.contains("hello world", "lo wo"))       # True
+print(strutils.contains("hello world", "xyz"))         # False
+
+# ─── String operations ────────────────────────────────────────────────
+
+# trim
+print(strutils.trim("  hello  "))          # hello
+print(strutils.trim_left("  hello  "))     # hello  
+print(strutils.trim_right("  hello  "))    #   hello
+
+# repeat
+print(strutils.repeat("ab", 3))           # ababab
+print(strutils.repeat("x", 0))            # (empty)
+print(strutils.repeat("x", 1))            # x
+
+# replace
+print(strutils.replace("aabbcc", "bb", "XX"))       # aaXXcc
+print(strutils.replace("abcabc", "abc", "x"))        # xx
+print(strutils.replace("hello", "xyz", "!"))          # hello
+
+# split
+parts: List[str] = strutils.split("a,b,c", ",")
+print(len(parts))         # 3
+print(parts[0])           # a
+print(parts[1])           # b
+print(parts[2])           # c
+
+parts2: List[str] = strutils.split("hello", ",")
+print(len(parts2))        # 1
+print(parts2[0])          # hello
+
+# join
+joined := strutils.join(parts, "-")
+print(joined)              # a-b-c
+
+empty: List[str] = List[str]()
+print(strutils.join(empty, ","))   # (empty)

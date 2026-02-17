@@ -1,0 +1,57 @@
+# Test redesigned for-in loop
+
+# 1. for i in range(n) — basic range
+for i:i64 in range(5)
+    print(i)
+end
+
+# 2. for i in range(start, end)
+for i:i64 in range(3, 7)
+    print(i)
+end
+
+# 3. for i in range(start, end, step)
+for i:i64 in range(0, 10, 3)
+    print(i)
+end
+
+# 4. for i in range(start, end, step) — negative step
+for i:i64 in range(10, 0, -2)
+    print(i)
+end
+
+# 5. for over a list variable
+nums: List[i64] = List[i64]()
+append[i64](nums, 100)
+append[i64](nums, 200)
+append[i64](nums, 300)
+for n:i64 in nums
+    print(n)
+end
+
+# 6. for over a list of strings
+names: List[str] = List[str]()
+append[str](names, "alice")
+append[str](names, "bob")
+append[str](names, "charlie")
+for name:str in names
+    print(name)
+end
+
+# 7. for k in keys(dict)
+d: Dict[str, i64] = Dict[str, i64]()
+put[str, i64](d, "x", 10)
+put[str, i64](d, "y", 20)
+put[str, i64](d, "z", 30)
+count: i64 = 0
+for k:str in keys(d)
+    count += 1
+end
+print(count)
+
+# 8. nested for
+for i:i64 in range(3)
+    for j:i64 in range(2)
+        print(i * 10 + j)
+    end
+end

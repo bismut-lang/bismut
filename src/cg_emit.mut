@@ -1,0 +1,654 @@
+# cg_emit.mut -- Declaration emission for C code generation
+#
+# Emits C type declarations: container instantiations, class/struct/interface
+# structs, function pointer typedefs, tuple typedefs, vtable instances,
+# extern type wrappers, and function prototypes.
+#
+# Does NOT emit method/function bodies — those live in cg_stmt.mut.
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import parser as mp
+import strutils as su
+import cg_types as ct
+import type_utils as tu
+import cg_state as cs
+
+# ─── Prelude ─────────────────────────────────────────────────────────
+
+def emit_prelude(cg: cs.CodeGen)
+    cg.w("#if !defined(_WIN32) && !defined(__APPLE__)")
+    cg.w("  #define _POSIX_C_SOURCE 199309L")
+    cg.w("#endif")
+    cg.w("#include <stdint.h>")
+    cg.w("#include <stdbool.h>")
+    cg.w('#include "rt_runtime.h"')
+    cg.w_empty()
+    cg.w("#define __LANG_RT_SRC(file, line, col) __lang_rt_src((file), (line), (col))")
+    cg.w_empty()
+    cg.w("int __lang_rt_argc_ = 0;")
+    cg.w("char** __lang_rt_argv_ = NULL;")
+end
+
+# ─── Function pointer typedefs ───────────────────────────────────────
+
+def emit_fn_typedefs(cg: cs.CodeGen)
+    k := keys(cg.used_fn_types)
+    if len(k) == 0
+        return
+    end
+    cg.w("// ---- function pointer typedefs ----")
+    i: i64 = 0
+    while i < len(k)
+        fn_ty := k[i]
+        params := tu.fn_param_types(fn_ty)
+        ret := tu.fn_ret_type(fn_ty)
+        td_name := ct.fn_typedef_name(fn_ty)
+        ret_c := ct.c_type(ret)
+        params_c := "void"
+        if len(params) > 0
+            sb := stringbuilder.new()
+            j: i64 = 0
+            while j < len(params)
+                if j > 0
+                    stringbuilder.append_str(sb, ", ")
+                end
+                stringbuilder.append_str(sb, ct.c_type(params[j]))
+                j += 1
+            end
+            params_c = stringbuilder.build(sb)
+        end
+        cg.w(format("typedef {} (*{})({});", ret_c, td_name, params_c))
+        i += 1
+    end
+    cg.w_empty()
+end
+
+# ─── Tuple typedefs ──────────────────────────────────────────────────
+
+def emit_tuple_typedefs(cg: cs.CodeGen)
+    if len(keys(cg.used_tuple_types)) == 0
+        return
+    end
+    emitted: Dict[str, i64] = Dict[str, i64]()
+    k := keys(cg.used_tuple_types)
+    i: i64 = 0
+    while i < len(k)
+        _emit_one_tuple(cg, k[i], emitted)
+        i += 1
+    end
+    cg.w_empty()
+end
+
+def _emit_one_tuple(cg: cs.CodeGen, ty: str, emitted: Dict[str, i64])
+    if has(emitted, ty)
+        return
+    end
+    elems := tu.tuple_elem_types(ty)
+    i: i64 = 0
+    while i < len(elems)
+        if tu.is_tuple_type(elems[i]) and has(cg.used_tuple_types, elems[i])
+            _emit_one_tuple(cg, elems[i], emitted)
+        end
+        i += 1
+    end
+    sn := ct.tuple_struct_name(ty)
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "typedef struct { ")
+    i = 0
+    while i < len(elems)
+        stringbuilder.append_str(sb, ct.c_type(elems[i]))
+        stringbuilder.append_str(sb, format(" f{}", i))
+        stringbuilder.append_str(sb, "; ")
+        i += 1
+    end
+    stringbuilder.append_str(sb, "} ")
+    stringbuilder.append_str(sb, sn)
+    stringbuilder.append_str(sb, ";")
+    cg.w(stringbuilder.build(sb))
+    emitted[ty] = 1
+end
+
+# ─── Container instantiations ────────────────────────────────────────
+
+# Primitive tag → C type
+_PRIM_TAG_VALS: Dict[str, str] = Dict[str, str]() {
+    "I8": "int8_t", "I16": "int16_t", "I32": "int32_t", "I64": "int64_t",
+    "U8": "uint8_t", "U16": "uint16_t", "U32": "uint32_t", "U64": "uint64_t",
+    "F32": "float", "F64": "double", "BOOL": "bool", "STR": "__lang_rt_Str*"
+}
+
+def _tag_cat(tag: str) -> str
+    if has(_PRIM_TAG_VALS, tag)
+        return "prim"
+    end
+    if su.starts_with(tag, "List_")
+        return "list"
+    end
+    if su.starts_with(tag, "Dict_")
+        return "dict"
+    end
+    if su.starts_with(tag, "__lang_rt_Fn_")
+        return "fn"
+    end
+    if ct.is_iface(tag)
+        return "iface"
+    end
+    if ct.is_struct(tag)
+        return "struct"
+    end
+    return "class"
+end
+
+def emit_container_instantiations(cg: cs.CodeGen)
+    # Forward-declare class types used in containers
+    class_tags: Dict[str, i64] = Dict[str, i64]()
+    # For list tags, check the tag directly
+    k := keys(cg.used_list_tags)
+    i: i64 = 0
+    while i < len(k)
+        cat := _tag_cat(k[i])
+        if cat == "class"
+            class_tags[k[i]] = 1
+        end
+        i += 1
+    end
+    # For dict tags (combined KTAG_VTAG), check the val tag
+    k = keys(cg.used_dict_tags)
+    i = 0
+    while i < len(k)
+        _kt, vt := ct.split_dict_tag(k[i])
+        cat := _tag_cat(vt)
+        if cat == "class"
+            class_tags[vt] = 1
+        end
+        i += 1
+    end
+
+    if len(keys(class_tags)) > 0
+        cg.w("// ---- forward declarations for class types in containers ----")
+        ck := keys(class_tags)
+        i = 0
+        while i < len(ck)
+            tag := ck[i]
+            cg.w(format("typedef struct __lang_rt_Class_{} __lang_rt_Class_{};", tag, tag))
+            cg.w(format("static void __lang_rt_class_{}_retain(__lang_rt_Class_{}* o);", tag, tag))
+            cg.w(format("static void __lang_rt_class_{}_release(__lang_rt_Class_{}* o);", tag, tag))
+            i += 1
+        end
+        cg.w_empty()
+    end
+
+    # Ensure List[K] exists for every Dict[K,V] (keys() support)
+    k = keys(cg.used_dict_tags)
+    i = 0
+    while i < len(k)
+        kt, _vt := ct.split_dict_tag(k[i])
+        cg.used_list_tags[kt] = 1
+        i += 1
+    end
+
+    # Topological sort: inner containers before outer
+    ordered: List[str] = List[str]()
+    ordered_kind: List[str] = List[str]()
+    visited: Dict[str, i64] = Dict[str, i64]()
+
+    k = keys(cg.used_list_tags)
+    i = 0
+    while i < len(k)
+        _topo_visit(k[i], "list", ordered, ordered_kind, visited)
+        i += 1
+    end
+    k = keys(cg.used_dict_tags)
+    i = 0
+    while i < len(k)
+        _topo_visit(k[i], "dict", ordered, ordered_kind, visited)
+        i += 1
+    end
+
+    if len(ordered) > 0
+        cg.w("// ---- container instantiations ----")
+    end
+    i = 0
+    while i < len(ordered)
+        tag := ordered[i]
+        kind := ordered_kind[i]
+        if kind == "list"
+            _emit_list_def(cg, tag)
+        else
+            _emit_dict_def(cg, tag)
+        end
+        i += 1
+    end
+
+    # range() helper
+    if has(cg.used_list_tags, "I64")
+        cg.w('#include "rt_range.h"')
+        cg.w_empty()
+    end
+
+    # keys() helpers
+    if len(keys(cg.used_dict_tags)) > 0
+        cg.w('#include "rt_dict_keys.h"')
+        k = keys(cg.used_dict_tags)
+        i = 0
+        while i < len(k)
+            kt, _vt := ct.split_dict_tag(k[i])
+            cg.w(format("__LANG_RT_DICT_KEYS_DEFINE({}, {})", k[i], kt))
+            i += 1
+        end
+        cg.w_empty()
+    end
+end
+
+def _topo_visit(tag: str, kind: str, ordered: List[str], ordered_kind: List[str], visited: Dict[str, i64])
+    key := format("{}:{}", kind, tag)
+    if has(visited, key)
+        return
+    end
+    visited[key] = 1
+    if kind == "list"
+        cat := _tag_cat(tag)
+        if cat == "list"
+            inner := string.substr(tag, 5, len(tag) - 5)
+            _topo_visit(inner, "list", ordered, ordered_kind, visited)
+        elif cat == "dict"
+            inner := string.substr(tag, 5, len(tag) - 5)
+            _topo_visit(inner, "dict", ordered, ordered_kind, visited)
+        end
+    elif kind == "dict"
+        # tag is combined "KTAG_VTAG"
+        _kt, vt := ct.split_dict_tag(tag)
+        cat := _tag_cat(vt)
+        if cat == "list"
+            inner := string.substr(vt, 5, len(vt) - 5)
+            _topo_visit(inner, "list", ordered, ordered_kind, visited)
+        elif cat == "dict"
+            inner := string.substr(vt, 5, len(vt) - 5)
+            _topo_visit(inner, "dict", ordered, ordered_kind, visited)
+        end
+    end
+    append(ordered, tag)
+    append(ordered_kind, kind)
+end
+
+def _drop_clone(tag: str, vprefix: str, name_tag: str) -> (str, str, str)
+    # Returns (c_type, drop_macro, clone_macro)
+    # name_tag overrides the macro name suffix (used for dict value macros)
+    dp := vprefix
+    nt := tag
+    if len(name_tag) > 0
+        nt = name_tag
+    end
+    cat := _tag_cat(tag)
+
+    if cat == "prim"
+        ct_str := _PRIM_TAG_VALS[tag]
+        if tag == "STR"
+            drop := format("#define __LANG_RT_{}DROP_{}(x) do {{ __lang_rt_str_release((x)); }} while(0)", dp, nt)
+            clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); __lang_rt_str_retain((src)); }} while(0)", dp, nt)
+            return (ct_str, drop, clone)
+        end
+        drop := format("#define __LANG_RT_{}DROP_{}(x) ((void)(x))", dp, nt)
+        clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); }} while(0)", dp, nt)
+        return (ct_str, drop, clone)
+    end
+
+    if cat == "list"
+        inner := string.substr(tag, 5, len(tag) - 5)
+        ct_str := format("__lang_rt_List_{}*", inner)
+        drop := format("#define __LANG_RT_{}DROP_{}(x) do {{ if ((x)) __lang_rt_list_{}_release((x)); }} while(0)", dp, nt, inner)
+        clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); if ((src)) __lang_rt_list_{}_retain((src)); }} while(0)", dp, nt, inner)
+        return (ct_str, drop, clone)
+    end
+
+    if cat == "dict"
+        inner := string.substr(tag, 5, len(tag) - 5)
+        ct_str := format("__lang_rt_Dict_{}*", inner)
+        drop := format("#define __LANG_RT_{}DROP_{}(x) do {{ if ((x)) __lang_rt_dict_{}_release((x)); }} while(0)", dp, nt, inner)
+        clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); if ((src)) __lang_rt_dict_{}_retain((src)); }} while(0)", dp, nt, inner)
+        return (ct_str, drop, clone)
+    end
+
+    if cat == "fn"
+        drop := format("#define __LANG_RT_{}DROP_{}(x) ((void)(x))", dp, nt)
+        clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); }} while(0)", dp, nt)
+        return (tag, drop, clone)
+    end
+
+    if cat == "iface"
+        ct_str := format("__lang_rt_Iface_{}", tag)
+        drop := format("#define __LANG_RT_{}DROP_{}(x) do {{ if ((x).obj) (x).vtbl->release((x).obj); }} while(0)", dp, nt)
+        clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); if ((src).obj) (src).vtbl->retain((src).obj); }} while(0)", dp, nt)
+        return (ct_str, drop, clone)
+    end
+
+    if cat == "struct"
+        ct_str := format("__lang_rt_Struct_{}", tag)
+        drop := format("#define __LANG_RT_{}DROP_{}(x) ((void)(x))", dp, nt)
+        clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); }} while(0)", dp, nt)
+        return (ct_str, drop, clone)
+    end
+
+    # class
+    ct_str := format("__lang_rt_Class_{}*", tag)
+    drop := format("#define __LANG_RT_{}DROP_{}(x) do {{ if ((x)) __lang_rt_class_{}_release((x)); }} while(0)", dp, nt, tag)
+    clone := format("#define __LANG_RT_{}CLONE_{}(dst, src) do {{ (dst) = (src); if ((src)) __lang_rt_class_{}_retain((src)); }} while(0)", dp, nt, tag)
+    return (ct_str, drop, clone)
+end
+
+def _emit_list_def(cg: cs.CodeGen, tag: str)
+    ct_str, drop_l, clone_l := _drop_clone(tag, "", "")
+    cg.w(drop_l)
+    cg.w(clone_l)
+    cg.w(format("__LANG_RT_LIST_DEFINE({}, {}, __LANG_RT_DROP_{}, __LANG_RT_CLONE_{})", tag, ct_str, tag, tag))
+    cg.w_empty()
+end
+
+def _emit_dict_def(cg: cs.CodeGen, tag: str)
+    # tag is combined "KTAG_VTAG"
+    key_tag, val_tag := ct.split_dict_tag(tag)
+    # Value type drop/clone (named with combined tag to avoid collisions)
+    vct, vdrop, vclone := _drop_clone(val_tag, "V", tag)
+    cg.w(vdrop)
+    cg.w(vclone)
+    # Key type macros
+    kct := ""
+    khash := ""
+    keq := ""
+    kclone := ""
+    kdrop := ""
+    knull := ""
+    if key_tag == "STR"
+        kct = "__lang_rt_Str*"
+        khash = "__LANG_RT_KHASH_STR"
+        keq = "__LANG_RT_KEQ_STR"
+        kclone = "__LANG_RT_KCLONE_STR"
+        kdrop = "__LANG_RT_KDROP_STR"
+        knull = "__LANG_RT_KNULL_STR"
+    else
+        kct = "int64_t"
+        if has(_PRIM_TAG_VALS, key_tag)
+            kct = _PRIM_TAG_VALS[key_tag]
+        end
+        khash = "__LANG_RT_KHASH_INT"
+        keq = "__LANG_RT_KEQ_INT"
+        kclone = "__LANG_RT_KCLONE_INT"
+        kdrop = "__LANG_RT_KDROP_INT"
+        knull = "__LANG_RT_KNULL_INT"
+    end
+    cg.w(format("__LANG_RT_DICT_DEFINE({}, {}, {}, {}, {}, {}, {}, {}, __LANG_RT_VCLONE_{}, __LANG_RT_VDROP_{})", tag, kct, vct, khash, keq, kclone, kdrop, knull, tag, tag))
+    cg.w_empty()
+end
+
+# ─── Class struct emission ───────────────────────────────────────────
+
+def emit_class_struct(cg: cs.CodeGen, cls: pars.Node)
+    name := cls.value
+    if has(cg.extern_info.type_info, name)
+        _emit_extern_type_struct(cg, cls)
+        return
+    end
+    cg.w(format("struct __lang_rt_Class_{} {{", name))
+    cg.ind += 1
+    cg.w("__lang_rt_Rc rc;")
+    i: i64 = 0
+    while i < cls.child_count()
+        c := cls.child(i)
+        if c.kind == mp.NodeKind.FIELD_DECL
+            fty := tu.type_node_to_str(c.child(0))
+            cg.w(format("{} {};", ct.c_type(fty), ct.ci(c.value)))
+        end
+        i += 1
+    end
+    cg.ind -= 1
+    cg.w("};")
+    cg.w_empty()
+    # Forward declare dtor/retain/release
+    cg.w(format("static void __lang_rt_class_{}_dtor(void* obj);", name))
+    cg.w(format("static void __lang_rt_class_{}_retain(__lang_rt_Class_{}* o);", name, name))
+    cg.w(format("static void __lang_rt_class_{}_release(__lang_rt_Class_{}* o);", name, name))
+    # Method forward declarations
+    i = 0
+    while i < cls.child_count()
+        c := cls.child(i)
+        if c.kind == mp.NodeKind.FUNC_DECL
+            if c.value == "init"
+                params_c := _method_params_str(c, True)
+                cg.w(format("static __lang_rt_Class_{}* __lang_rt_class_{}_new(__lang_rt_Src __lang_rt__src{});", name, name, params_c))
+            else
+                ret_c := ct.c_type(tu.func_ret_type_str(c))
+                params_c := method_params(name, c, False)
+                cg.w(format("static {} __lang_rt_class_{}_{}({});", ret_c, name, c.value, params_c))
+            end
+        end
+        i += 1
+    end
+    cg.w_empty()
+end
+
+def _emit_extern_type_struct(cg: cs.CodeGen, cls: pars.Node)
+    name := cls.value
+    c_ty := cg.extern_info.type_c_type(name)
+    cg.w(format("struct __lang_rt_Class_{} {{", name))
+    cg.ind += 1
+    cg.w("__lang_rt_Rc rc;")
+    cg.w(format("{}* ptr;", c_ty))
+    cg.ind -= 1
+    cg.w("};")
+    cg.w_empty()
+    cg.w(format("static void __lang_rt_class_{}_dtor(void* obj);", name))
+    cg.w(format("static void __lang_rt_class_{}_retain(__lang_rt_Class_{}* o);", name, name))
+    cg.w(format("static void __lang_rt_class_{}_release(__lang_rt_Class_{}* o);", name, name))
+    cg.w(format("static __lang_rt_Class_{}* __lang_rt_extern_{}_wrap({}* ptr);", name, name, c_ty))
+    cg.w_empty()
+end
+
+# ─── Struct typedef emission ─────────────────────────────────────────
+
+def emit_struct_typedef(cg: cs.CodeGen, st: pars.Node)
+    name := st.value
+    cg.w(format("typedef struct __lang_rt_Struct_{}_s {{", name))
+    cg.ind += 1
+    i: i64 = 0
+    while i < st.child_count()
+        c := st.child(i)
+        if c.kind == mp.NodeKind.FIELD_DECL
+            fty := tu.type_node_to_str(c.child(0))
+            cg.w(format("{} {};", ct.c_type(fty), ct.ci(c.value)))
+        end
+        i += 1
+    end
+    cg.ind -= 1
+    cg.w(format("}} __lang_rt_Struct_{};", name))
+    # Method forward declarations
+    i = 0
+    while i < st.child_count()
+        c := st.child(i)
+        if c.kind == mp.NodeKind.FUNC_DECL
+            ret_c := ct.c_type(tu.func_ret_type_str(c))
+            params_c := method_params(name, c, True)
+            cg.w(format("static {} __lang_rt_struct_{}_{}({});", ret_c, name, c.value, params_c))
+        end
+        i += 1
+    end
+    cg.w_empty()
+end
+
+# ─── Interface types emission ────────────────────────────────────────
+
+def emit_iface_types(cg: cs.CodeGen, iface: pars.Node)
+    name := iface.value
+    # Vtable struct
+    cg.w(format("typedef struct __lang_rt_Vtbl_{} {{", name))
+    cg.ind += 1
+    cg.w("void (*retain)(void*);")
+    cg.w("void (*release)(void*);")
+    i: i64 = 0
+    while i < iface.child_count()
+        ms := iface.child(i)
+        if ms.kind == mp.NodeKind.METHOD_SIG
+            ret_c := ct.c_type(tu.type_node_to_str(ms.child(1)))
+            params_c := _iface_sig_params(ms)
+            cg.w(format("{} (*{})({});", ret_c, ct.ci(ms.value), params_c))
+        end
+        i += 1
+    end
+    cg.ind -= 1
+    cg.w(format("}} __lang_rt_Vtbl_{};", name))
+    cg.w_empty()
+    # Fat pointer struct
+    cg.w(format("typedef struct __lang_rt_Iface_{} {{", name))
+    cg.ind += 1
+    cg.w("void* obj;")
+    cg.w(format("__lang_rt_Vtbl_{}* vtbl;", name))
+    cg.ind -= 1
+    cg.w(format("}} __lang_rt_Iface_{};", name))
+    cg.w_empty()
+end
+
+def emit_vtable_instance(cg: cs.CodeGen, cls: pars.Node, iface: pars.Node)
+    cname := cls.value
+    iname := iface.value
+    cg.w(format("static __lang_rt_Vtbl_{} __lang_rt_vtbl_{}_as_{} = {{", iname, cname, iname))
+    cg.ind += 1
+    cg.w(format(".retain = (void(*)(void*))__lang_rt_class_{}_retain,", cname))
+    cg.w(format(".release = (void(*)(void*))__lang_rt_class_{}_release,", cname))
+    i: i64 = 0
+    while i < iface.child_count()
+        ms := iface.child(i)
+        if ms.kind == mp.NodeKind.METHOD_SIG
+            ret_c := ct.c_type(tu.type_node_to_str(ms.child(1)))
+            params_c := _iface_sig_params(ms)
+            cast := format("({}(*)({}))", ret_c, params_c)
+            cg.w(format(".{} = {}__lang_rt_class_{}_{},", ct.ci(ms.value), cast, cname, ms.value))
+        end
+        i += 1
+    end
+    cg.ind -= 1
+    cg.w("};")
+    cg.w_empty()
+end
+
+# ─── Function prototypes and extern wrappers ─────────────────────────
+
+def fn_proto(cg: cs.CodeGen, f: pars.Node) -> str
+    ret_c := ct.c_type(tu.func_ret_type_str(f))
+    pb := tu.func_params_block(f)
+    sb := stringbuilder.new()
+    j: i64 = 0
+    while j < pb.child_count()
+        p := pb.child(j)
+        if j > 0
+            stringbuilder.append_str(sb, ", ")
+        end
+        stringbuilder.append_str(sb, ct.c_type(tu.type_node_to_str(p.child(0))))
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, ct.ci(p.value))
+        j += 1
+    end
+    params_c := stringbuilder.build(sb)
+    if len(params_c) == 0
+        params_c = "void"
+    end
+    return format("static {} __lang_rt_fn_{}({})", ret_c, f.value, params_c)
+end
+
+def emit_extern_wrapper(cg: cs.CodeGen, f: pars.Node)
+    c_name := f.ty
+    cg.w(format("{} {{", fn_proto(cg, f)))
+    cg.ind += 1
+    # Build argument list, unwrapping extern type params
+    pb := tu.func_params_block(f)
+    sb := stringbuilder.new()
+    j: i64 = 0
+    while j < pb.child_count()
+        p := pb.child(j)
+        if j > 0
+            stringbuilder.append_str(sb, ", ")
+        end
+        pty := tu.type_node_to_str(p.child(0))
+        if has(cg.extern_info.type_info, pty)
+            stringbuilder.append_str(sb, format("{}->ptr", ct.ci(p.value)))
+        else
+            stringbuilder.append_str(sb, ct.ci(p.value))
+        end
+        j += 1
+    end
+    args_str := stringbuilder.build(sb)
+    ret_ty := tu.func_ret_type_str(f)
+    if ret_ty == "void"
+        cg.w(format("{}({});", c_name, args_str))
+    elif has(cg.extern_info.type_info, ret_ty)
+        cg.w(format("return __lang_rt_extern_{}_wrap({}({}));", ret_ty, c_name, args_str))
+    else
+        cg.w(format("return {}({});", c_name, args_str))
+    end
+    cg.ind -= 1
+    cg.w("}")
+end
+
+# ─── Helpers: parameter string builders ──────────────────────────────
+
+def _method_params_str(func: pars.Node, skip_self: bool) -> str
+    # Returns ", type1 name1, type2 name2" for non-self params
+    pb := tu.func_params_block(func)
+    sb := stringbuilder.new()
+    i: i64 = 0
+    while i < pb.child_count()
+        p := pb.child(i)
+        if skip_self and p.value == "self"
+            i += 1
+            continue
+        end
+        stringbuilder.append_str(sb, ", ")
+        stringbuilder.append_str(sb, ct.c_type(tu.type_node_to_str(p.child(0))))
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, ct.ci(p.value))
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end
+
+def method_params(type_name: str, func: pars.Node, is_struct: bool) -> str
+    sb := stringbuilder.new()
+    if is_struct
+        stringbuilder.append_str(sb, format("__lang_rt_Struct_{} self", type_name))
+    else
+        stringbuilder.append_str(sb, format("__lang_rt_Class_{}* self", type_name))
+    end
+    pb := tu.func_params_block(func)
+    i: i64 = 0
+    while i < pb.child_count()
+        p := pb.child(i)
+        if p.value == "self"
+            i += 1
+            continue
+        end
+        stringbuilder.append_str(sb, ", ")
+        stringbuilder.append_str(sb, ct.c_type(tu.type_node_to_str(p.child(0))))
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, ct.ci(p.value))
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end
+
+def _iface_sig_params(ms: pars.Node) -> str
+    # Build "void*, type1, type2, ..." for an interface method signature
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "void*")
+    pb := ms.child(0)
+    j: i64 = 0
+    while j < pb.child_count()
+        p := pb.child(j)
+        if p.value != "self"
+            stringbuilder.append_str(sb, ", ")
+            stringbuilder.append_str(sb, ct.c_type(tu.type_node_to_str(p.child(0))))
+        end
+        j += 1
+    end
+    return stringbuilder.build(sb)
+end

@@ -1,0 +1,69 @@
+# Test all new features
+
+extern string
+extern filesystem
+extern os
+
+# 1. For loop
+for i:i64 in range(5)
+    print(i)
+end
+
+# 2. For loop with start,end
+for i:i64 in range(3, 7)
+    print(i)
+end
+
+# 3. String ops
+s: str = "hello world"
+print(len(s))
+print(string.char_at(s, 0))
+print(string.substr(s, 0, 5))
+print(string.chr(65))
+print(string.find(s, "world"))
+print(string.concat(s, "!!!"))
+
+# 4. Conversions
+print(string.i64_to_str(42))
+print(string.f64_to_str(3.14))
+print(string.bool_to_str(True))
+
+# 5. None
+x: str = None
+if x == None
+    print("x is None")
+end
+x = "hello"
+if x != None
+    print(x)
+end
+
+# 6. Class
+class Point
+    x: i64
+    y: i64
+
+    def init(self, x: i64, y: i64)
+        self.x = x
+        self.y = y
+    end
+
+    def sum(self) -> i64
+        return self.x + self.y
+    end
+end
+
+p: Point = Point(10, 20)
+print(p.x)
+print(p.y)
+print(p.sum())
+
+# 7. File I/O
+filesystem.write("_test_out.txt", "hello from bismut")
+print(filesystem.exists("_test_out.txt"))
+content: str = filesystem.read("_test_out.txt")
+print(content)
+
+# 8. Command execution
+rc: i64 = os.exec("echo done")
+print(rc)

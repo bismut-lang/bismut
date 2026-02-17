@@ -1,0 +1,18 @@
+# Test diag.mut — pretty error diagnostics
+extern string
+import langtools.diag
+
+source := "x: i64 = 10\ny := foo(x)\nprint(y)"
+
+d := diag.Diagnostic(source, "test.mut")
+
+# Test error (just exercise the code, output goes to print)
+d.error(2, 6, 3, "undefined function 'foo'")
+
+# Test warning
+d.warn(1, 1, 1, "unused variable")
+
+# Test note
+d.note(3, 1, 5, "defined here")
+
+print("done")

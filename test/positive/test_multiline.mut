@@ -1,0 +1,87 @@
+# Test: multi-line expressions inside (), [], {}
+# Newlines are suppressed inside matching bracket pairs.
+
+extern string
+
+# ─── Multi-line function declaration ─────────────────────────────────
+
+def add3(a: i64,
+         b: i64,
+         c: i64) -> i64
+    return a + b + c
+end
+
+def greet(name: str,
+          greeting: str) -> str
+    return string.concat(greeting, string.concat(" ", name))
+end
+
+# ─── Multi-line function calls ───────────────────────────────────────
+
+x := add3(10,
+           20,
+           30)
+print(x)
+# expect: 60
+
+msg := greet("World",
+             "Hello")
+print(msg)
+# expect: Hello World
+
+# ─── Multi-line list literal ─────────────────────────────────────────
+
+nums := List[i64]() {
+    100,
+    200,
+    300
+}
+print(len(nums))
+# expect: 3
+print(nums[0])
+# expect: 100
+print(nums[2])
+# expect: 300
+
+# ─── Multi-line dict literal ─────────────────────────────────────────
+
+d := Dict[str, i64]() {
+    "a": 1,
+    "b": 2,
+    "c": 3
+}
+print(len(d))
+# expect: 3
+print(d["b"])
+# expect: 2
+
+# ─── Multi-line condition (parenthesized expression) ─────────────────
+
+a: i64 = 5
+b: i64 = 10
+if (a > 0
+    and b > 0)
+    print("both positive")
+end
+# expect: both positive
+
+# ─── Nested multi-line ───────────────────────────────────────────────
+
+result := add3(
+    add3(1,
+         2,
+         3),
+    add3(4, 5, 6),
+    7
+)
+print(result)
+# expect: 28
+
+# ─── Multi-line subscript ────────────────────────────────────────────
+
+vals := List[i64]() {10, 20, 30, 40, 50}
+idx := vals[
+    2
+]
+print(idx)
+# expect: 30

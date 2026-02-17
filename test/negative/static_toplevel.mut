@@ -1,0 +1,2 @@
+# Negative: static variable at top level (only allowed inside functions)
+static x: i64 = 0

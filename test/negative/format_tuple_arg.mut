@@ -1,0 +1,4 @@
+# format() with tuple argument — should fail
+t := (1, 2)
+s := format("tuple: {}", t)
+print(s)

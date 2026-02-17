@@ -1,0 +1,87 @@
+# Test: function pointers (Fn types)
+
+# --- Basic function pointer assignment and call ---
+
+def add(a: i64, b: i64) -> i64
+    return a + b
+end
+
+def mul(a: i64, b: i64) -> i64
+    return a * b
+end
+
+f: Fn(i64, i64) -> i64 = add
+print(f(3, 4))      # expect: 7
+
+f = mul
+print(f(3, 4))      # expect: 12
+
+# --- Function pointer as parameter ---
+
+def apply(func: Fn(i64, i64) -> i64, x: i64, y: i64) -> i64
+    return func(x, y)
+end
+
+print(apply(add, 10, 20))   # expect: 30
+print(apply(mul, 10, 20))   # expect: 200
+
+# --- Void return function pointer ---
+
+def greet(name: str)
+    print(name)
+end
+
+g: Fn(str) -> void = greet
+g("hello")                   # expect: hello
+
+# --- No-arg function pointer ---
+
+def seven() -> i64
+    return 7
+end
+
+h: Fn() -> i64 = seven
+print(h())                   # expect: 7
+
+# --- Function pointer in list ---
+
+ops: List[Fn(i64, i64) -> i64] = List[Fn(i64, i64) -> i64]()
+append(ops, add)
+append(ops, mul)
+append(ops, sub)
+
+for i:i64 in range(len(ops))
+    print(ops[i](6, 2))
+end
+# expect: 8, 12, 4
+
+# --- Function pointer in dict ---
+
+d: Dict[str, Fn(i64, i64) -> i64] = Dict[str, Fn(i64, i64) -> i64]()
+d["add"] = add
+d["mul"] = mul
+print(d["add"](10, 5))     # expect: 15
+print(d["mul"](10, 5))     # expect: 50
+
+# --- Reassignment ---
+def sub(a: i64, b: i64) -> i64
+    return a - b
+end
+
+f = sub
+print(f(10, 3))             # expect: 7
+
+# --- Return function pointer from function ---
+
+def pick_op(use_add: bool) -> Fn(i64, i64) -> i64
+    if use_add
+        return add
+    end
+    return mul
+end
+
+op: Fn(i64, i64) -> i64 = pick_op(True)
+print(op(5, 3))             # expect: 8
+
+op = pick_op(False)
+print(op(5, 3))             # expect: 15

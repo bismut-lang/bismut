@@ -1,0 +1,3 @@
+# Negative: append wrong type to list
+nums: List[i64] = List[i64]()
+append(nums, "hello")

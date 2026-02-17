@@ -1,0 +1,4 @@
+# Negative: missing parentheses on function definition
+def foo -> i64
+    return 42
+end

@@ -1,0 +1,7 @@
+# Negative: call function with wrong argument type
+
+def greet(name: str)
+    print(name)
+end
+
+greet(42)

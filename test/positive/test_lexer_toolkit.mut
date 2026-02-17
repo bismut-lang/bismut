@@ -1,0 +1,268 @@
+# Test: lexer toolkit module
+# Verifies the generic lexer toolkit from modules/lexer/lex.mut
+
+import langtools.lex
+import strutils
+
+# --- Test 1: character classification ---
+print(strutils.is_alpha(65))         # True  (A)
+print(strutils.is_alpha(48))         # False (0)
+print(strutils.is_digit(48))         # True  (0)
+print(strutils.is_digit(65))         # False (A)
+print(strutils.is_alnum(65))         # True  (A)
+print(strutils.is_alnum(48))         # True  (0)
+print(strutils.is_ident_start(95))   # True  (_)
+print(strutils.is_ident_start(48))   # False (0)
+print(strutils.is_ident_part(95))    # True  (_)
+print(strutils.is_ident_part(48))    # True  (0)
+print(strutils.is_whitespace(32))    # True  (space)
+print(strutils.is_whitespace(10))    # False (newline)
+print(strutils.is_newline(10))       # True
+print(strutils.is_hex_digit(65))     # True (A)
+print(strutils.is_hex_digit(71))     # False (G)
+
+# --- Test 2: Lexer creation and basic operations ---
+lx := lex.Lexer("<test>", "hello 123")
+print(lx.eof())                 # False
+print(lx.peek())                # 104 (h)
+
+c := lx.advance()
+print(c)                        # 104 (h)
+print(lx.peek())                # 101 (e)
+
+# --- Test 3: read_ident ---
+lx2 := lex.Lexer("<test>", "foo_bar 123")
+tok := lx2.read_ident()
+print(tok.lexeme)               # foo_bar
+print(tok.kind)                 # 1 (TK_IDENT)
+print(tok.line)                 # 1
+print(tok.col)                  # 1
+
+# --- Test 4: skip_whitespace + read_number ---
+lx2.skip_whitespace()
+tok2 := lx2.read_number()
+print(tok2.lexeme)              # 123
+print(tok2.kind)                # 2 (TK_INT)
+
+# --- Test 5: read_number float ---
+lx3 := lex.Lexer("<test>", "3.14")
+tok3 := lx3.read_number()
+print(tok3.lexeme)              # 3.14
+print(tok3.kind)                # 3 (TK_FLOAT)
+
+# --- Test 6: read_number hex ---
+lx4 := lex.Lexer("<test>", "0xFF")
+tok4 := lx4.read_number()
+print(tok4.lexeme)              # 0xFF
+print(tok4.kind)                # 2 (TK_INT)
+
+# --- Test 7: read_string ---
+lx5 := lex.Lexer("<test>", "\"hello world\"")
+tok5 := lx5.read_string(34)
+print(tok5.lexeme)              # "hello world"
+print(tok5.kind)                # 4 (TK_STRING)
+
+# --- Test 8: keyword classification ---
+keywords: Dict[str, i64] = Dict[str, i64]()
+keywords["if"] = 200
+keywords["else"] = 201
+keywords["while"] = 202
+
+lx6 := lex.Lexer("<test>", "if x while")
+id1 := lx6.read_ident()
+kw1 := id1.classify(keywords)
+print(kw1.kind)                 # 200 (if)
+print(kw1.lexeme)               # if
+
+lx6.skip_whitespace()
+id2 := lx6.read_ident()
+kw2 := id2.classify(keywords)
+print(kw2.kind)                 # 1 (TK_IDENT, not a keyword)
+print(kw2.lexeme)               # x
+
+lx6.skip_whitespace()
+id3 := lx6.read_ident()
+kw3 := id3.classify(keywords)
+print(kw3.kind)                 # 202 (while)
+
+# --- Test 9: match_char ---
+lx7 := lex.Lexer("<test>", "+=")
+print(lx7.match_char(43))       # True  (+)
+print(lx7.match_char(61))       # True  (=)
+print(lx7.eof())                # True
+
+# --- Test 10: save/restore position ---
+lx8 := lex.Lexer("<test>", "abcdef")
+lx8.advance()
+lx8.advance()
+saved := lx8.save_pos()
+lx8.advance()
+lx8.advance()
+print(lx8.peek())               # 101 (e)
+lx8.restore_pos(saved)
+print(lx8.peek())               # 99 (c)
+
+# --- Test 11: error formatting ---
+lx9 := lex.Lexer("test.mut", "x")
+msg := lx9.error_msg("unexpected token")
+print(msg)                       # test.mut:1:1: error: unexpected token
+
+# --- Test 12: token methods ---
+t := lex.Token(1, "hello", 5, 10)
+print(t.to_str())                # 1:hello @ 5:10
+print(t.is_eof())                # False
+print(t.is_error())              # False
+print(t.is_kind(1))              # True
+
+# --- Test 13: read_while with function pointer ---
+lx10 := lex.Lexer("<test>", "aaabbb123")
+s := lx10.read_while(strutils.is_alpha)
+print(s)                         # aaabbb
+
+# --- Test 14: skip_line_comment ---
+lx11 := lex.Lexer("<test>", "# this is a comment\ncode")
+print(lx11.skip_line_comment("#"))  # True
+print(lx11.peek())                  # 10 (newline)
+lx11.advance()
+s2 := lx11.read_while(strutils.is_alpha)
+print(s2)                           # code
+
+# --- Test 15: starts_with without consuming ---
+lx12 := lex.Lexer("<test>", "->arrow")
+print(lx12.starts_with("->"))       # True
+print(lx12.peek())                  # 45 (- still there, not consumed)
+
+# --- Test 16: skip_block_comment (non-nested) ---
+lx13 := lex.Lexer("<test>", "/* comment */code")
+print(lx13.skip_block_comment("/*", "*/", False))  # True
+s3 := lx13.read_while(strutils.is_alpha)
+print(s3)                                           # code
+
+# --- Test 17: skip_block_comment (nested) ---
+lx14 := lex.Lexer("<test>", "/* a /* b */ c */end")
+print(lx14.skip_block_comment("/*", "*/", True))   # True
+s4 := lx14.read_while(strutils.is_alpha)
+print(s4)                                           # end
+
+# --- Test 18: skip_block_comment (no match) ---
+lx15 := lex.Lexer("<test>", "hello")
+print(lx15.skip_block_comment("/*", "*/", False))  # False
+print(lx15.peek())                                  # 104 (h, unconsumed)
+
+# --- Test 19: read_number octal ---
+lx16 := lex.Lexer("<test>", "0o755")
+tok6 := lx16.read_number()
+print(tok6.lexeme)              # 0o755
+print(tok6.kind)                # 2 (TK_INT)
+
+# --- Test 20: read_number with underscore separators ---
+lx17 := lex.Lexer("<test>", "1_000_000")
+tok7 := lx17.read_number()
+print(tok7.lexeme)              # 1_000_000
+print(tok7.kind)                # 2 (TK_INT)
+
+# --- Test 21: read_number float with underscores ---
+lx18 := lex.Lexer("<test>", "1_234.567_8")
+tok8 := lx18.read_number()
+print(tok8.lexeme)              # 1_234.567_8
+print(tok8.kind)                # 3 (TK_FLOAT)
+
+# --- Test 22: read_raw_string ---
+lx19 := lex.Lexer("<test>", "'hello\\nworld'")
+tok9 := lx19.read_raw_string(39)
+print(tok9.lexeme)              # 'hello\nworld' (backslash preserved)
+print(tok9.kind)                # 4 (TK_STRING)
+print(len(tok9.lexeme))         # 14 (includes quotes, literal backslash-n)
+
+# --- Test 23: read_multiline_string ---
+lx20 := lex.Lexer("<test>", "\"line1\nline2\"")
+tok10 := lx20.read_multiline_string(34)
+print(tok10.kind)               # 4 (TK_STRING, not error)
+print(tok10.is_error())         # False
+
+# --- Test 24: read_string rejects newline (contrast with multiline) ---
+lx21 := lex.Lexer("<test>", "\"line1\nline2\"")
+tok11 := lx21.read_string(34)
+print(tok11.kind)               # 6 (TK_ERROR)
+print(tok11.is_error())         # True
+
+# --- Test 25: skip_block_comment with custom delimiters ---
+lx22 := lex.Lexer("<test>", "{- comment -}ok")
+print(lx22.skip_block_comment("{-", "-}", False))  # True
+s5 := lx22.read_while(strutils.is_alpha)
+print(s5)                                           # ok
+
+# EXPECTED:
+# True
+# False
+# True
+# False
+# True
+# True
+# True
+# False
+# True
+# True
+# True
+# False
+# True
+# True
+# False
+# False
+# 104
+# 104
+# 101
+# foo_bar
+# 1
+# 1
+# 1
+# 123
+# 2
+# 3.14
+# 3
+# 0xFF
+# 2
+# "hello world"
+# 4
+# 200
+# if
+# 1
+# x
+# 202
+# True
+# True
+# True
+# 101
+# 99
+# test.mut:1:1: error: unexpected token
+# 1:hello @ 5:10
+# False
+# False
+# True
+# aaabbb
+# True
+# 10
+# code
+# True
+# 45
+# True
+# code
+# True
+# end
+# False
+# 104
+# 0o755
+# 2
+# 1_000_000
+# 2
+# 1_234.567_8
+# 3
+# 'hello\nworld'
+# 4
+# 14
+# 4
+# False
+# 6
+# True
+# True
+# ok

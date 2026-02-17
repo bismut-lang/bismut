@@ -1,0 +1,2 @@
+# Negative: unterminated string literal
+x: str = "hello

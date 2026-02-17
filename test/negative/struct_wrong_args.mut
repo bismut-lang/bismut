@@ -1,0 +1,7 @@
+# ERROR: wrong number of arguments to struct constructor
+struct Point
+    x: i64
+    y: i64
+end
+
+p := Point(1, 2, 3)

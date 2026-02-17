@@ -1,0 +1,4 @@
+# ERROR: missing 'end' to close struct
+struct Point
+    x: i64
+    y: i64

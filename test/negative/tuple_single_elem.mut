@@ -1,0 +1,2 @@
+# ERROR: tuple type with only 1 element
+x: (i64) = (42)

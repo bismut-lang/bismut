@@ -1,0 +1,3 @@
+# format() first arg is not a string — should fail
+s := format(42, "hello")
+print(s)

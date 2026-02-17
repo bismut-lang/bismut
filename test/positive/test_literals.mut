@@ -1,0 +1,71 @@
+# Test char literals, multiline strings, hex/binary literals
+
+# Char literals produce i64 values (ASCII codes)
+a: i64 = 'A'
+print(a)             # expect: 65
+
+b: i64 = 'z'
+print(b)             # expect: 122
+
+c: i64 = '0'
+print(c)             # expect: 48
+
+# Null char
+d: i64 = '\0'
+print(d)             # expect: 0
+
+# Newline escape
+e: i64 = '\n'
+print(e)             # expect: 10
+
+# Tab escape
+f: i64 = '\t'
+print(f)             # expect: 9
+
+# Char in expressions
+print('A' + 1)       # expect: 66  (B)
+print('z' - 'a')     # expect: 25
+
+# Char comparison
+if 'A' < 'B'
+    print(1)         # expect: 1
+end
+
+# Hex literals
+x: i64 = 0xFF
+print(x)             # expect: 255
+
+y: i64 = 0x0
+print(y)             # expect: 0
+
+# Binary literals
+z: i64 = 0b1010
+print(z)             # expect: 10
+
+w: i64 = 0b0
+print(w)             # expect: 0
+
+# i32 hex
+small: i32 = 0x1F
+print(small)         # expect: 31
+
+# Triple-quoted strings (multiline)
+msg: str = """hello world"""
+print(msg)           # expect: hello world
+
+# EXPECTED:
+# 65
+# 122
+# 48
+# 0
+# 10
+# 9
+# 66
+# 25
+# 1
+# 255
+# 0
+# 10
+# 0
+# 31
+# hello world

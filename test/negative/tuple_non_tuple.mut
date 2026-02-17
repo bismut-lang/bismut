@@ -1,0 +1,3 @@
+# ERROR: cannot destructure non-tuple type
+x: i64 = 42
+a, b := x

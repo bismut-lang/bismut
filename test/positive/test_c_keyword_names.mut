@@ -1,0 +1,85 @@
+# Test that Bismut identifiers matching C keywords compile correctly.
+# The compiler must mangle all field names and parameter names to avoid
+# collisions with C reserved words.
+
+class Token
+    short: str
+    long: str
+    int: i64
+    double: f64
+    float: f32
+    auto: bool
+    register: i64
+    volatile: str
+
+    def init(self, short: str, long: str, int: i64, double: f64, float: f32, auto: bool)
+        self.short = short
+        self.long = long
+        self.int = int
+        self.double = double
+        self.float = float
+        self.auto = auto
+        self.register = 0
+        self.volatile = "none"
+    end
+
+    def describe(self) -> str
+        return self.short
+    end
+end
+
+struct Pair
+    signed: i64
+    unsigned: i64
+end
+
+def compute(char: i64, sizeof: i64) -> i64
+    return char + sizeof
+end
+
+def use_switch(default: str) -> str
+    return default
+end
+
+# Test class with C keyword fields
+t := Token("s", "long_name", 42, 3.14, f32(1.5), True)
+print(t.short)
+print(t.long)
+print(t.int)
+print(t.double)
+print(t.float)
+print(t.auto)
+t.register = 99
+print(t.register)
+t.volatile = "yes"
+print(t.volatile)
+print(t.describe())
+
+# Test struct with C keyword fields
+p := Pair(10, 20)
+print(p.signed)
+print(p.unsigned)
+p.signed = 30
+print(p.signed)
+
+# Test function with C keyword params
+print(compute(100, 200))
+print(use_switch("hello"))
+
+print("ok")
+
+# expected: s
+# expected: long_name
+# expected: 42
+# expected: 3.1400000000000001
+# expected: 1.5
+# expected: true
+# expected: 99
+# expected: yes
+# expected: s
+# expected: 10
+# expected: 20
+# expected: 30
+# expected: 300
+# expected: hello
+# expected: ok

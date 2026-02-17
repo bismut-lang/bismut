@@ -1,0 +1,2 @@
+# Negative: missing closing bracket in list type
+nums: List[i64 = List[i64]()

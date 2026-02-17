@@ -1,0 +1,13 @@
+# pxmatrix — example Bismut extern library with opaque C struct types
+# Demonstrates extern types with refcounting integration.
+
+[types]
+Matrix = pxmatrix_t
+
+[functions]
+create(rows: i64, cols: i64) -> Matrix = pxmatrix_create
+destroy(m: Matrix) [dtor] = pxmatrix_destroy
+set(m: Matrix, r: i64, c: i64, v: f64) = pxmatrix_set
+get(m: Matrix, r: i64, c: i64) -> f64 = pxmatrix_get
+rows(m: Matrix) -> i64 = pxmatrix_rows
+cols(m: Matrix) -> i64 = pxmatrix_cols

@@ -1,0 +1,114 @@
+# test_generics.mut — test full generics, type inference, := shorthand
+
+# ============================================================
+# 1. Renamed builtins with explicit type params
+# ============================================================
+
+nums: List[i64] = List[i64]()
+append[i64](nums, 10)
+append[i64](nums, 20)
+append[i64](nums, 30)
+print(len(nums))          # 3
+
+x: i64 = get[i64](nums, 0)
+print(x)                  # 10
+
+set[i64](nums, 0, 99)
+print(get[i64](nums, 0))  # 99
+
+# dict ops
+d: Dict[str, i64] = Dict[str, i64]()
+put[str, i64](d, "a", 1)
+put[str, i64](d, "b", 2)
+print(len(d))             # 2
+print(lookup[str, i64](d, "a"))  # 1
+print(has[str, i64](d, "b"))     # True
+
+# str len
+s: str = "hello"
+print(len(s))             # 5
+
+# ============================================================
+# 2. Type inference on generic calls (no explicit [T])
+# ============================================================
+
+nums2: List[i64] = List[i64]()
+append(nums2, 100)         # infer T=i64 from nums2
+append(nums2, 200)
+print(len(nums2))          # 2
+print(get(nums2, 0))       # 100
+
+d2: Dict[str, str] = Dict[str, str]()
+put(d2, "key", "val")      # infer T=str from d2
+print(lookup(d2, "key"))   # val
+print(has(d2, "key"))      # True
+
+# ============================================================
+# 3. := shorthand (type inferred from RHS)
+# ============================================================
+
+n := 42
+print(n)                   # 42
+
+msg := "hello"
+print(msg)                 # hello
+
+flag := True
+print(flag)                # True
+
+pi := 3.14
+print(pi)                  # 3.14
+
+nums3 := List[i64]()
+append(nums3, 7)
+print(get(nums3, 0))       # 7
+
+# ============================================================
+# 4. User-defined generic function
+# ============================================================
+
+def identity[T](x: T) -> T
+    return x
+end
+
+a: i64 = identity[i64](42)
+print(a)                   # 42
+
+b: str = identity[str]("world")
+print(b)                   # world
+
+# with inference
+c: i64 = identity(99)
+print(c)                   # 99
+
+d3: str = identity("bismut")
+print(d3)                  # bismut
+
+# ============================================================
+# 5. Generic function with container types
+# ============================================================
+
+def first[T](lst: List[T]) -> T
+    return get[T](lst, 0)
+end
+
+nums4: List[i64] = List[i64]()
+append(nums4, 42)
+print(first(nums4))        # 42
+
+names: List[str] = List[str]()
+append(names, "alice")
+print(first(names))        # alice
+
+# ============================================================
+# 6. append is void (in-place mutation)
+# ============================================================
+
+items := List[i64]()
+append(items, 1)
+append(items, 2)
+append(items, 3)
+print(len(items))          # 3
+print(get(items, 2))       # 3
+
+print("all tests passed")

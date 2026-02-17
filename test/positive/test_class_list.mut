@@ -1,0 +1,44 @@
+class Person
+  name: str
+  age: i64
+
+  def init(self, name: str, age: i64)
+    self.name = name
+    self.age = age
+  end
+end
+
+# Create a list of Person
+people: List[Person] = List[Person]()
+
+p1: Person = Person("Alice", 30)
+p2: Person = Person("Bob", 25)
+p3: Person = Person("Charlie", 40)
+
+append[Person](people, p1)
+append[Person](people, p2)
+append[Person](people, p3)
+
+# Length
+n: i64 = len(people)
+print(n)
+
+# Get
+first: Person = get[Person](people, 0)
+print(first.name)
+print(first.age)
+
+# Iterate
+for p: Person in people
+  print(p.name)
+end
+
+# Set
+p4: Person = Person("Diana", 35)
+set[Person](people, 1, p4)
+
+replaced: Person = get[Person](people, 1)
+print(replaced.name)
+print(replaced.age)
+
+

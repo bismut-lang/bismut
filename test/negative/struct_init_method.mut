@@ -1,0 +1,10 @@
+# ERROR: structs cannot have init methods
+struct Point
+    x: i64
+    y: i64
+
+    def init(self, x: i64, y: i64)
+        self.x = x
+        self.y = y
+    end
+end

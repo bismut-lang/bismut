@@ -1,0 +1,2 @@
+# Negative: missing equals in variable declaration
+x: i64 10

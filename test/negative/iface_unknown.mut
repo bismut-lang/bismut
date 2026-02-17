@@ -1,0 +1,6 @@
+# Negative: class implements non-existent interface
+
+class Foo : NonExistent
+    def init(self)
+    end
+end

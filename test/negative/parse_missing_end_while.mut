@@ -1,0 +1,4 @@
+# Negative: missing 'end' to close while
+x: i64 = 0
+while x < 10
+    x += 1

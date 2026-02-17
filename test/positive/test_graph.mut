@@ -1,0 +1,46 @@
+# Test graph.mut — directed graph with topo sort and cycle detection
+import langtools.graph
+
+# --- Topo sort (dependencies-first) ---
+g := graph.Graph()
+g.add_node("a")
+g.add_node("b")
+g.add_node("c")
+g.add_edge("a", "b")
+g.add_edge("b", "c")
+
+sorted := g.topo_sort()
+i: i64 = 0
+while i < len(sorted)
+    print(sorted[i])
+    i += 1
+end
+
+# --- No cycle ---
+print(g.has_cycle())
+
+# --- Add cycle ---
+g.add_edge("c", "a")
+print(g.has_cycle())
+
+# --- Find cycle ---
+cycle := g.find_cycle()
+print(len(cycle) > 0)
+
+# --- Topo sort returns empty on cyclic graph ---
+sorted2 := g.topo_sort()
+print(len(sorted2))
+
+# --- Duplicate add_node is idempotent ---
+g2 := graph.Graph()
+g2.add_node("x")
+g2.add_node("x")
+g2.add_edge("x", "y")
+sorted3 := g2.topo_sort()
+j: i64 = 0
+while j < len(sorted3)
+    print(sorted3[j])
+    j += 1
+end
+
+print("done")

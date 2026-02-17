@@ -1,0 +1,2 @@
+# Negative: declare variable with unknown type
+x: Foo = 42

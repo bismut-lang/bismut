@@ -1,0 +1,25 @@
+# Negative: downcast to class that doesn't implement the interface
+
+interface IShape
+    def area(self) -> i64
+end
+
+class Circle : IShape
+    r: i64
+    def init(self, r: i64)
+        self.r = r
+    end
+    def area(self) -> i64
+        return self.r * self.r * 3
+    end
+end
+
+class Unrelated
+    x: i64
+    def init(self, x: i64)
+        self.x = x
+    end
+end
+
+s: IShape = Circle(5)
+u: Unrelated = s as Unrelated

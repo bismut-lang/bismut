@@ -1,0 +1,436 @@
+# main.mut -- Self-hosted Bismut compiler entry point
+#
+# Usage:
+#   bismut build <file.mut>   [-o name] [--release] [--cc path] [--compiler-dir dir]
+#   bismut run <file.mut>     [--release] [--compiler-dir dir] [-- args...]
+#   bismut analyze <file.mut> [--compiler-dir dir]
+
+extern string
+extern stringbuilder
+extern filesystem
+extern os
+@if __LINUX__
+extern tcc
+@elif __WIN__
+extern tcc
+@end
+
+import langtools.pars
+import langtools.sink
+import langtools.argparse as ap
+import preprocessor as pp
+import parser as mp
+import typecheck as tc
+import import_resolver as ir
+import codegen as gen_mod
+import analyzer as az
+import strutils as su
+import pathutils as pu
+
+const VERSION: str = "0.1.0"
+
+# ─── Helpers ─────────────────────────────────────────────────────────
+
+def _report_errors(s: sink.Sink)
+    j: i64 = 0
+    while j < s.count()
+        m := s.get(j)
+        print(format("{}:{}:{}: error: {}", m.file, m.line, m.col, m.msg))
+        j += 1
+    end
+    os.exit(1)
+end
+
+def _detect_compiler_dir() -> str
+    return pu.path_dir(os.argv(0))
+end
+
+
+# ─── Compile pipeline (shared by build / run) ────────────────────────
+
+class CompileResult
+    extern_info: ir.ExternInfo
+    c_code: str
+    ok: bool
+
+    def init(self)
+        self.extern_info = ir.ExternInfo()
+        self.c_code = ""
+        self.ok = False
+    end
+end
+
+def _compile(src_file: str, compiler_dir: str, debug: bool, defines: List[str]) -> CompileResult
+    result := CompileResult()
+
+    if not filesystem.exists(src_file)
+        print(format("error: file '{}' not found", src_file))
+        os.exit(1)
+    end
+
+    source := filesystem.read(src_file)
+    source = pp.preprocess_with_defines(source, src_file, defines)
+
+    s := sink.Sink()
+    prog := mp.parse(src_file, source, s)
+    if s.has_errors()
+        _report_errors(s)
+    end
+
+    ext := ir.resolve(prog, src_file, compiler_dir, s, defines)
+    if s.has_errors()
+        _report_errors(s)
+    end
+
+    tc.check(prog, s)
+    if s.has_errors()
+        _report_errors(s)
+    end
+
+    c_code := gen_mod.generate_c(prog, src_file, ext, debug)
+
+    result.c_code = c_code
+    result.extern_info = ext
+    result.ok = True
+    return result
+end
+
+# ─── Build C compiler command ────────────────────────────────────────
+
+def _build_cc_cmd(cc: str, c_file: str, out_name: str, release: bool, compiler_dir: str, ext: ir.ExternInfo) -> str
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, cc)
+
+    if release
+        stringbuilder.append_str(sb, " -O2")
+    else
+        stringbuilder.append_str(sb, " -g -O0")
+    end
+
+    stringbuilder.append_str(sb, " -std=c99 -I")
+    stringbuilder.append_str(sb, pu.path_join(compiler_dir, "rt"))
+
+    i: i64 = 0
+    while i < len(ext.cflags)
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, ext.cflags[i])
+        i += 1
+    end
+
+    stringbuilder.append_str(sb, " -o ")
+    stringbuilder.append_str(sb, out_name)
+    stringbuilder.append_str(sb, " ")
+    stringbuilder.append_str(sb, c_file)
+    stringbuilder.append_str(sb, " -lm")
+
+    i = 0
+    while i < len(ext.ldflags)
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, ext.ldflags[i])
+        i += 1
+    end
+
+    return stringbuilder.build(sb)
+end
+
+# ─── TCC in-process compilation (Linux / Windows) ────────────────────
+
+@if __LINUX__
+def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, ext: ir.ExternInfo)
+    state := tcc.new()
+    tcc.set_output_exe(state)
+
+    # Point TCC at its bundled headers and runtime
+    tcc.set_lib_path(state, pu.path_join(compiler_dir, "libs/tcc/linux"))
+
+    if release
+        tcc.set_options(state, "-O2")
+    end
+    tcc.set_options(state, "-std=c99")
+    tcc.add_include_path(state, pu.path_join(compiler_dir, "rt"))
+
+    i: i64 = 0
+    while i < len(ext.cflags)
+        tcc.set_options(state, ext.cflags[i])
+        i += 1
+    end
+
+    rc := tcc.compile_string(state, c_code)
+    if rc == -1
+        print("error: tcc compilation failed")
+        os.exit(1)
+    end
+
+    tcc.add_library(state, "m")
+    i = 0
+    while i < len(ext.ldflags)
+        tcc.set_options(state, ext.ldflags[i])
+        i += 1
+    end
+
+    rc = tcc.output_file(state, out_name)
+    if rc == -1
+        print("error: tcc failed to write output")
+        os.exit(1)
+    end
+end
+@elif __WIN__
+def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, ext: ir.ExternInfo)
+    state := tcc.new()
+    tcc.set_output_exe(state)
+
+    # Point TCC at its bundled headers and runtime
+    tcc_dir := pu.path_join(compiler_dir, "libs\\tcc\\win")
+    tcc.set_lib_path(state, tcc_dir)
+    tcc.add_include_path(state, pu.path_join(tcc_dir, "include"))
+    tcc.add_include_path(state, pu.path_join(tcc_dir, "include\\winapi"))
+    tcc.add_library_path(state, pu.path_join(tcc_dir, "lib"))
+
+    if release
+        tcc.set_options(state, "-O2")
+    end
+    tcc.set_options(state, "-std=c99")
+    tcc.add_include_path(state, pu.path_join(compiler_dir, "rt"))
+
+    i: i64 = 0
+    while i < len(ext.cflags)
+        tcc.set_options(state, ext.cflags[i])
+        i += 1
+    end
+
+    rc := tcc.compile_string(state, c_code)
+    if rc == -1
+        print("error: tcc compilation failed")
+        os.exit(1)
+    end
+
+    i = 0
+    while i < len(ext.ldflags)
+        tcc.set_options(state, ext.ldflags[i])
+        i += 1
+    end
+
+    rc = tcc.output_file(state, out_name)
+    if rc == -1
+        print("error: tcc failed to write output")
+        os.exit(1)
+    end
+end
+@end
+
+# ─── C compiler detection ────────────────────────────────────────────
+
+def _has_cc(name: str) -> bool
+    @if __WIN__
+    rc := os.exec(format("where {} > nul 2>&1", name))
+    @else
+    rc := os.exec(format("which {} > /dev/null 2>&1", name))
+    @end
+    return rc == 0
+end
+
+def _find_cc(requested: str) -> str
+    if len(requested) > 0
+        return requested
+    end
+    if _has_cc("gcc")
+        return "gcc"
+    end
+    @if __MACOS__
+    if _has_cc("cc")
+        return "cc"
+    end
+    @end
+    @if __WIN__
+    if _has_cc("cl")
+        return "cl"
+    end
+    @end
+    return ""
+end
+
+# ─── Derive output name from source file ─────────────────────────────
+
+def _default_output_name(src_file: str) -> str
+    name := src_file
+    i := len(name) - 1
+    while i >= 0
+        if name[i] == '/' or name[i] == '\\'
+            name = string.substr(name, i + 1, len(name) - i - 1)
+            i = -1
+        else
+            i -= 1
+        end
+    end
+    if su.ends_with(name, ".mut")
+        name = string.substr(name, 0, len(name) - 4)
+    end
+    @if __WIN__
+    name = string.concat(name, ".exe")
+    @end
+    return name
+end
+
+# ─── Subcommand: build ───────────────────────────────────────────────
+
+def _cmd_build(args: ap.ParsedArgs, compiler_dir: str)
+    src_file := args.get("file")
+    release := args.flag("release")
+    debug := not release
+    out_name := args.get("output")
+    defines := args.get_list("define")
+
+    result := _compile(src_file, compiler_dir, debug, defines)
+
+    if len(out_name) == 0
+        out_name = _default_output_name(src_file)
+    end
+
+    @if __LINUX__
+    use_tcc := args.flag("tcc")
+    @elif __WIN__
+    use_tcc := args.flag("tcc")
+    @else
+    use_tcc := False
+    @end
+
+    if use_tcc
+        @if __LINUX__
+        _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+        @elif __WIN__
+        _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+        @end
+    else
+        cc := _find_cc(args.get("cc"))
+
+        if len(cc) > 0
+            filesystem.write("out.c", result.c_code)
+            rc := os.exec(_build_cc_cmd(cc, "out.c", out_name, release, compiler_dir, result.extern_info))
+            if rc != 0
+                print(format("error: {} exited with code {}", cc, rc))
+                os.exit(1)
+            end
+        else
+            @if __LINUX__
+            print("note: gcc not found, using embedded tcc (binaries may be 2-3x slower)")
+            _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+            @elif __WIN__
+            print("note: gcc not found, using embedded tcc (binaries may be 2-3x slower)")
+            _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+            @else
+            print("error: no C compiler found. Install gcc or use --cc to specify one.")
+            os.exit(1)
+            @end
+        end
+    end
+end
+
+# ─── Subcommand: run ─────────────────────────────────────────────────
+
+def _cmd_run(args: ap.ParsedArgs, compiler_dir: str)
+    src_file := args.get("file")
+    release := args.flag("release")
+    debug := not release
+    defines := args.get_list("define")
+
+    result := _compile(src_file, compiler_dir, debug, defines)
+    out_name := _default_output_name(src_file)
+
+    @if __LINUX__
+    _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+    @elif __WIN__
+    _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+    @else
+    # MACOS builtin tcc not supported right now
+    cc := _find_cc("")
+    if len(cc) == 0
+        print("error: no C compiler found. Install gcc or clang.")
+        os.exit(1)
+    end
+    filesystem.write("out.c", result.c_code)
+    rc := os.exec(_build_cc_cmd(cc, "out.c", out_name, release, compiler_dir, result.extern_info))
+    if rc != 0
+        print(format("error: {} exited with code {}", cc, rc))
+        os.exit(1)
+    end
+    @end
+
+    sb := stringbuilder.new()
+    @if __WIN__
+    stringbuilder.append_str(sb, out_name)
+    @else
+    stringbuilder.append_str(sb, "./")
+    stringbuilder.append_str(sb, out_name)
+    @end
+    i: i64 = 0
+    while i < args.positional_count()
+        stringbuilder.append_str(sb, " ")
+        stringbuilder.append_str(sb, args.positional(i))
+        i += 1
+    end
+
+    os.exit(os.exec(stringbuilder.build(sb)))
+end
+
+# ─── Subcommand: analyze ─────────────────────────────────────────────
+
+def _cmd_analyze(args: ap.ParsedArgs, compiler_dir: str)
+    src_file := args.get("file")
+    defines := args.get_list("define")
+    result := az.analyze(src_file, compiler_dir, defines)
+    print(az.result_to_json(result))
+    if not result.success
+        os.exit(1)
+    end
+end
+
+# ─── Main ────────────────────────────────────────────────────────────
+
+cli := ap.ArgParser("bismut", "Bismut compiler")
+cli.add_help()
+cli.add_version(format("bismut {}", VERSION))
+
+build_cmd := cli.add_command("build", "Compile to native binary")
+build_cmd.add_positional("file", "Source .mut file", True)
+build_cmd.add_option("output", "o", "Output binary name", "")
+build_cmd.add_flag("release", "r", "Optimized release build (default is debug)")
+build_cmd.add_option("cc", "", "C compiler to use (default: gcc)", "")
+build_cmd.add_flag("tcc", "", "Use embedded TCC compiler")
+build_cmd.add_multi_option("define", "D", "Preprocessor define")
+build_cmd.add_option("compiler-dir", "", "Compiler root directory", "")
+
+run_cmd := cli.add_command("run", "Build and run")
+run_cmd.add_positional("file", "Source .mut file", True)
+run_cmd.add_flag("release", "r", "Optimized release build (default is debug)")
+run_cmd.add_multi_option("define", "D", "Preprocessor define")
+run_cmd.add_option("compiler-dir", "", "Compiler root directory", "")
+
+analyze_cmd := cli.add_command("analyze", "Analyze and output JSON diagnostics")
+analyze_cmd.add_positional("file", "Source .mut file", True)
+analyze_cmd.add_multi_option("define", "D", "Preprocessor define")
+analyze_cmd.add_option("compiler-dir", "", "Compiler root directory", "")
+
+args := cli.parse()
+
+if args.flag("help")
+    if len(args.command()) > 0
+        sub := cli._commands[args.command()]
+        print(sub.help())
+    else
+        print(cli.help())
+    end
+    os.exit(0)
+end
+
+compiler_dir := args.get("compiler-dir")
+if len(compiler_dir) == 0
+    compiler_dir = _detect_compiler_dir()
+end
+
+if args.command() == "build"
+    _cmd_build(args, compiler_dir)
+elif args.command() == "run"
+    _cmd_run(args, compiler_dir)
+elif args.command() == "analyze"
+    _cmd_analyze(args, compiler_dir)
+end

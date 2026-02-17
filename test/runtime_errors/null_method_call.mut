@@ -1,0 +1,14 @@
+# Runtime panic: null pointer dereference on method call
+
+class Counter
+    n: i64
+    def init(self, n: i64)
+        self.n = n
+    end
+    def get(self) -> i64
+        return self.n
+    end
+end
+
+c: Counter = None
+print(c.get())

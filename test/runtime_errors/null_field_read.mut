@@ -1,0 +1,11 @@
+# Runtime panic: null pointer dereference on field read
+
+class Node
+    val: i64
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+n: Node = None
+print(n.val)

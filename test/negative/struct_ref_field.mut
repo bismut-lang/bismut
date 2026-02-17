@@ -1,0 +1,5 @@
+# ERROR: struct fields cannot be reference types
+struct Bad
+    name: str
+    val: i64
+end

@@ -1,0 +1,28 @@
+# Runtime panic: downcast to wrong concrete class
+
+interface IShape
+    def name(self) -> str
+end
+
+class Circle : IShape
+    r: i64
+    def init(self, r: i64)
+        self.r = r
+    end
+    def name(self) -> str
+        return "Circle"
+    end
+end
+
+class Rect : IShape
+    w: i64
+    def init(self, w: i64)
+        self.w = w
+    end
+    def name(self) -> str
+        return "Rect"
+    end
+end
+
+s: IShape = Rect(10)
+c: Circle = s as Circle

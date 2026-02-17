@@ -1,0 +1,635 @@
+# argparse.mut — General-purpose CLI argument parser
+#
+# Supports flags, options with values, positional arguments, subcommands,
+# short/long forms, defaults, required options, and auto-generated help.
+#
+# Basic usage (no subcommands):
+#   ap := argparse.ArgParser("mytool", "A cool tool")
+#   ap.add_flag("verbose", "v", "Enable verbose output")
+#   ap.add_option("output", "o", "Output file", "out.txt")
+#   ap.add_positional("input", "Input file", True)
+#   ap.add_help()
+#   args := ap.parse()
+#   if args.flag("help")
+#       print(ap.help())
+#       os.exit(0)
+#   end
+#
+# Subcommand usage:
+#   ap := argparse.ArgParser("bismut", "Bismut compiler")
+#   ap.add_help()
+#
+#   build := ap.add_command("build", "Compile to native binary")
+#   build.add_positional("file", "Source .mut file", True)
+#   build.add_option("output", "o", "Output name", "")
+#   build.add_flag("debug", "d", "Debug mode")
+#
+#   run := ap.add_command("run", "Build and run")
+#   run.add_positional("file", "Source .mut file", True)
+#   run.add_flag("debug", "d", "Debug mode")
+#
+#   args := ap.parse()
+#   if args.command() == "build"
+#       file := args.get("file")
+#   end
+#
+# Parsing rules:
+#   --name           set flag to true
+#   --name value     set option to value
+#   --name=value     set option to value
+#   -n               short flag
+#   -n value         short option
+#   -n=value         short option
+#   --               stop parsing flags, rest are positionals
+#   (bare args)      positional arguments in declaration order
+
+extern string
+extern os
+extern stringbuilder
+
+# ─── Option kinds ─────────────────────────────────────────────────────
+
+const OPT_FLAG: i64 = 0
+const OPT_OPTION: i64 = 1
+const OPT_POSITIONAL: i64 = 2
+const OPT_MULTI: i64 = 3
+
+# ─── Option definition ───────────────────────────────────────────────
+
+class OptDef
+    name: str
+    short: str
+    desc: str
+    default_val: str
+    kind: i64
+    required: bool
+
+    def init(self, name: str, short: str, desc: str, default_val: str, kind: i64, required: bool)
+        self.name = name
+        self.short = short
+        self.desc = desc
+        self.default_val = default_val
+        self.kind = kind
+        self.required = required
+    end
+end
+
+# ─── Parsed result ───────────────────────────────────────────────────
+
+class ParsedArgs
+    values: Dict[str, str]
+    _flags: Dict[str, i64]
+    _multi: Dict[str, List[str]]
+    _command: str
+    rest: List[str]
+
+    def init(self)
+        self.values = Dict[str, str]()
+        self._flags = Dict[str, i64]()
+        self._multi = Dict[str, List[str]]()
+        self._command = ""
+        self.rest = List[str]()
+    end
+
+    def command(self) -> str
+        return self._command
+    end
+
+    def get(self, name: str) -> str
+        if has(self.values, name)
+            return self.values[name]
+        end
+        return ""
+    end
+
+    def get_or(self, name: str, fallback: str) -> str
+        if has(self.values, name)
+            return self.values[name]
+        end
+        return fallback
+    end
+
+    def get_i64(self, name: str) -> i64
+        return string.str_to_i64(self.get(name))
+    end
+
+    def get_f64(self, name: str) -> f64
+        return string.str_to_f64(self.get(name))
+    end
+
+    def flag(self, name: str) -> bool
+        if has(self._flags, name)
+            return self._flags[name] == 1
+        end
+        return False
+    end
+
+    def is_set(self, name: str) -> bool
+        return has(self.values, name) or has(self._flags, name) or has(self._multi, name)
+    end
+
+    def get_list(self, name: str) -> List[str]
+        if has(self._multi, name)
+            return self._multi[name]
+        end
+        return List[str]()
+    end
+
+    def positional(self, index: i64) -> str
+        return self.rest[index]
+    end
+
+    def positional_count(self) -> i64
+        return len(self.rest)
+    end
+end
+
+# ─── Argument parser ─────────────────────────────────────────────────
+
+class ArgParser
+    prog: str
+    desc: str
+    defs: List[OptDef]
+    short_map: Dict[str, str]
+    _has_help: bool
+    _version_str: str
+    _commands: Dict[str, ArgParser]
+    _cmd_order: List[str]
+
+    def init(self, prog: str, desc: str)
+        self.prog = prog
+        self.desc = desc
+        self.defs = List[OptDef]()
+        self.short_map = Dict[str, str]()
+        self._has_help = False
+        self._version_str = ""
+        self._commands = Dict[str, ArgParser]()
+        self._cmd_order = List[str]()
+    end
+
+    # ── Definition methods ───────────────────────────────────────────
+
+    def add_flag(self, name: str, short: str, desc: str)
+        append(self.defs, OptDef(name, short, desc, "", OPT_FLAG, False))
+        if len(short) > 0
+            self.short_map[short] = name
+        end
+    end
+
+    def add_option(self, name: str, short: str, desc: str, default_val: str)
+        append(self.defs, OptDef(name, short, desc, default_val, OPT_OPTION, False))
+        if len(short) > 0
+            self.short_map[short] = name
+        end
+    end
+
+    def add_required_option(self, name: str, short: str, desc: str)
+        append(self.defs, OptDef(name, short, desc, "", OPT_OPTION, True))
+        if len(short) > 0
+            self.short_map[short] = name
+        end
+    end
+
+    def add_multi_option(self, name: str, short: str, desc: str)
+        append(self.defs, OptDef(name, short, desc, "", OPT_MULTI, False))
+        if len(short) > 0
+            self.short_map[short] = name
+        end
+    end
+
+    def add_positional(self, name: str, desc: str, required: bool)
+        append(self.defs, OptDef(name, "", desc, "", OPT_POSITIONAL, required))
+    end
+
+    def add_help(self)
+        self.add_flag("help", "h", "Show this help message")
+        self._has_help = True
+    end
+
+    def add_version(self, version_str: str)
+        self.add_flag("version", "V", "Show version")
+        self._version_str = version_str
+    end
+
+    def add_command(self, name: str, desc: str) -> ArgParser
+        sub_prog := string.concat(string.concat(self.prog, " "), name)
+        sub := ArgParser(sub_prog, desc)
+        sub.add_help()
+        self._commands[name] = sub
+        append(self._cmd_order, name)
+        return sub
+    end
+
+    def has_commands(self) -> bool
+        return len(self._cmd_order) > 0
+    end
+
+    # ── Parse os.argv() ──────────────────────────────────────────────
+
+    def parse(self) -> ParsedArgs
+        if self.has_commands()
+            return _parse_with_commands(self)
+        end
+        return _parse_from(self, 1)
+    end
+
+    # ── Help text ────────────────────────────────────────────────────
+
+    def help(self) -> str
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, self.desc)
+
+        if self.has_commands()
+            stringbuilder.append_str(sb, "\n\nUsage: ")
+            stringbuilder.append_str(sb, self.prog)
+            stringbuilder.append_str(sb, " <command> [options]\n")
+
+            stringbuilder.append_str(sb, "\nCommands:\n")
+            i: i64 = 0
+            while i < len(self._cmd_order)
+                name := self._cmd_order[i]
+                sub := self._commands[name]
+                stringbuilder.append_str(sb, "  ")
+                stringbuilder.append_str(sb, name)
+                pad := len(name)
+                while pad < 20
+                    stringbuilder.append_str(sb, " ")
+                    pad += 1
+                end
+                stringbuilder.append_str(sb, "  ")
+                stringbuilder.append_str(sb, sub.desc)
+                stringbuilder.append_str(sb, "\n")
+                i += 1
+            end
+
+            stringbuilder.append_str(sb, "\nUse '")
+            stringbuilder.append_str(sb, self.prog)
+            stringbuilder.append_str(sb, " <command> --help' for command-specific help.\n")
+
+            return stringbuilder.build(sb)
+        end
+
+        stringbuilder.append_str(sb, "\n\nUsage: ")
+        stringbuilder.append_str(sb, self.prog)
+        _append_usage_positionals(sb, self.defs)
+        stringbuilder.append_str(sb, " [options]\n")
+        _append_options_section(sb, self.defs)
+        _append_positionals_section(sb, self.defs)
+
+        return stringbuilder.build(sb)
+    end
+end
+
+# ─── Internal: parse with subcommands ─────────────────────────────────
+
+def _parse_with_commands(ap: ArgParser) -> ParsedArgs
+    # Check for --help/-h or --version/-V before command
+    if os.argc() >= 2
+        first := os.argv(1)
+        if first == "--help" or first == "-h"
+            result := ParsedArgs()
+            result._flags["help"] = 1
+            return result
+        end
+        if len(ap._version_str) > 0
+            if first == "--version" or first == "-V"
+                print(ap._version_str)
+                os.exit(0)
+            end
+        end
+    end
+
+    if os.argc() < 2
+        print(format("{}: error: expected a command", ap.prog))
+        print(format("Try '{} --help' for more information.", ap.prog))
+        os.exit(1)
+    end
+
+    cmd_name := os.argv(1)
+    if not has(ap._commands, cmd_name)
+        print(format("{}: error: unknown command '{}'", ap.prog, cmd_name))
+        print(format("Try '{} --help' for more information.", ap.prog))
+        os.exit(1)
+    end
+
+    sub := ap._commands[cmd_name]
+    result := _parse_from(sub, 2)
+    result._command = cmd_name
+    return result
+end
+
+# ─── Internal: core parse logic from a given argv index ──────────────
+
+def _parse_from(ap: ArgParser, start_idx: i64) -> ParsedArgs
+    result := ParsedArgs()
+
+    # Apply defaults
+    i: i64 = 0
+    while i < len(ap.defs)
+        d := ap.defs[i]
+        if d.kind == OPT_OPTION and len(d.default_val) > 0
+            result.values[d.name] = d.default_val
+        end
+        if d.kind == OPT_FLAG
+            result._flags[d.name] = 0
+        end
+        i += 1
+    end
+
+    positional_defs := _get_positional_defs(ap.defs)
+    pos_idx: i64 = 0
+    past_dashdash: bool = False
+
+    argc := os.argc()
+    idx := start_idx
+    while idx < argc
+        arg := os.argv(idx)
+
+        if past_dashdash
+            _assign_positional(result, positional_defs, pos_idx, arg)
+            pos_idx += 1
+            append(result.rest, arg)
+            idx += 1
+            continue
+        end
+
+        if arg == "--"
+            past_dashdash = True
+            idx += 1
+            continue
+        end
+
+        if _starts_with(arg, "--")
+            raw := string.substr(arg, 2, len(arg) - 2)
+            eq_pos := string.find(raw, "=")
+            if eq_pos >= 0
+                name := string.substr(raw, 0, eq_pos)
+                val := string.substr(raw, eq_pos + 1, len(raw) - eq_pos - 1)
+                _set_named(ap, result, name, val)
+            else
+                odef := _find_def_by_name(ap.defs, raw)
+                if odef == None
+                    _die(ap, format("unknown option '--{}'", raw))
+                end
+                if odef.kind == OPT_FLAG
+                    result._flags[raw] = 1
+                else
+                    idx += 1
+                    if idx >= argc
+                        _die(ap, format("option '--{}' requires a value", raw))
+                    end
+                    _set_named(ap, result, raw, os.argv(idx))
+                end
+            end
+            idx += 1
+            continue
+        end
+
+        if _starts_with(arg, "-") and len(arg) > 1
+            short_ch := string.substr(arg, 1, 1)
+            if not has(ap.short_map, short_ch)
+                _die(ap, format("unknown option '-{}'", short_ch))
+            end
+            name := ap.short_map[short_ch]
+            if len(arg) > 2
+                rest := string.substr(arg, 2, len(arg) - 2)
+                if _starts_with(rest, "=")
+                    rest = string.substr(rest, 1, len(rest) - 1)
+                end
+                _set_named(ap, result, name, rest)
+            else
+                odef := _find_def_by_name(ap.defs, name)
+                if odef == None
+                    _die(ap, format("unknown option '-{}'", short_ch))
+                end
+                if odef.kind == OPT_FLAG
+                    result._flags[name] = 1
+                else
+                    idx += 1
+                    if idx >= argc
+                        _die(ap, format("option '-{}' requires a value", short_ch))
+                    end
+                    _set_named(ap, result, name, os.argv(idx))
+                end
+            end
+            idx += 1
+            continue
+        end
+
+        # Bare argument → positional
+        _assign_positional(result, positional_defs, pos_idx, arg)
+        pos_idx += 1
+        append(result.rest, arg)
+        idx += 1
+    end
+
+    _check_required(ap, result, positional_defs, pos_idx)
+    return result
+end
+
+# ─── Internal: help text building blocks ──────────────────────────────
+
+def _append_usage_positionals(sb: stringbuilder.StringBuilder, defs: List[OptDef])
+    i: i64 = 0
+    while i < len(defs)
+        d := defs[i]
+        if d.kind == OPT_POSITIONAL
+            if d.required
+                stringbuilder.append_str(sb, " <")
+            else
+                stringbuilder.append_str(sb, " [")
+            end
+            stringbuilder.append_str(sb, d.name)
+            if d.required
+                stringbuilder.append_str(sb, ">")
+            else
+                stringbuilder.append_str(sb, "]")
+            end
+        end
+        i += 1
+    end
+end
+
+def _append_options_section(sb: stringbuilder.StringBuilder, defs: List[OptDef])
+    has_opts: bool = False
+    i: i64 = 0
+    while i < len(defs)
+        if defs[i].kind != OPT_POSITIONAL
+            has_opts = True
+        end
+        i += 1
+    end
+
+    if not has_opts
+        return
+    end
+
+    stringbuilder.append_str(sb, "\nOptions:\n")
+    i = 0
+    while i < len(defs)
+        d := defs[i]
+        if d.kind != OPT_POSITIONAL
+            stringbuilder.append_str(sb, "  ")
+            if len(d.short) > 0
+                stringbuilder.append_str(sb, "-")
+                stringbuilder.append_str(sb, d.short)
+                stringbuilder.append_str(sb, ", ")
+            else
+                stringbuilder.append_str(sb, "    ")
+            end
+            stringbuilder.append_str(sb, "--")
+            stringbuilder.append_str(sb, d.name)
+            if d.kind == OPT_OPTION or d.kind == OPT_MULTI
+                stringbuilder.append_str(sb, " <value>")
+            end
+            cur_len := 6 + len(d.name)
+            if d.kind == OPT_OPTION or d.kind == OPT_MULTI
+                cur_len += 8
+            end
+            while cur_len < 24
+                stringbuilder.append_str(sb, " ")
+                cur_len += 1
+            end
+            stringbuilder.append_str(sb, "  ")
+            stringbuilder.append_str(sb, d.desc)
+            if d.kind == OPT_OPTION and len(d.default_val) > 0
+                stringbuilder.append_str(sb, " (default: ")
+                stringbuilder.append_str(sb, d.default_val)
+                stringbuilder.append_str(sb, ")")
+            end
+            if d.required
+                stringbuilder.append_str(sb, " [required]")
+            end
+            if d.kind == OPT_MULTI
+                stringbuilder.append_str(sb, " [repeatable]")
+            end
+            stringbuilder.append_str(sb, "\n")
+        end
+        i += 1
+    end
+end
+
+def _append_positionals_section(sb: stringbuilder.StringBuilder, defs: List[OptDef])
+    has_pos: bool = False
+    i: i64 = 0
+    while i < len(defs)
+        if defs[i].kind == OPT_POSITIONAL
+            has_pos = True
+        end
+        i += 1
+    end
+
+    if not has_pos
+        return
+    end
+
+    stringbuilder.append_str(sb, "\nArguments:\n")
+    i = 0
+    while i < len(defs)
+        d := defs[i]
+        if d.kind == OPT_POSITIONAL
+            stringbuilder.append_str(sb, "  ")
+            stringbuilder.append_str(sb, d.name)
+            cur_len := len(d.name)
+            while cur_len < 24
+                stringbuilder.append_str(sb, " ")
+                cur_len += 1
+            end
+            stringbuilder.append_str(sb, "  ")
+            stringbuilder.append_str(sb, d.desc)
+            if d.required
+                stringbuilder.append_str(sb, " [required]")
+            end
+            stringbuilder.append_str(sb, "\n")
+        end
+        i += 1
+    end
+end
+
+# ─── Internal helpers ─────────────────────────────────────────────────
+
+def _starts_with(s: str, prefix: str) -> bool
+    plen := len(prefix)
+    if len(s) < plen
+        return False
+    end
+    return string.substr(s, 0, plen) == prefix
+end
+
+def _find_def_by_name(defs: List[OptDef], name: str) -> OptDef
+    i: i64 = 0
+    while i < len(defs)
+        if defs[i].name == name
+            return defs[i]
+        end
+        i += 1
+    end
+    return None
+end
+
+def _get_positional_defs(defs: List[OptDef]) -> List[OptDef]
+    result := List[OptDef]()
+    i: i64 = 0
+    while i < len(defs)
+        if defs[i].kind == OPT_POSITIONAL
+            append(result, defs[i])
+        end
+        i += 1
+    end
+    return result
+end
+
+def _set_named(ap: ArgParser, result: ParsedArgs, name: str, val: str)
+    odef := _find_def_by_name(ap.defs, name)
+    if odef == None
+        _die(ap, format("unknown option '--{}'", name))
+    end
+    if odef.kind == OPT_FLAG
+        result._flags[name] = 1
+    elif odef.kind == OPT_MULTI
+        if not has(result._multi, name)
+            result._multi[name] = List[str]()
+        end
+        append(result._multi[name], val)
+    else
+        result.values[name] = val
+    end
+end
+
+def _assign_positional(result: ParsedArgs, pos_defs: List[OptDef], pos_idx: i64, val: str)
+    if pos_idx < len(pos_defs)
+        result.values[pos_defs[pos_idx].name] = val
+    end
+end
+
+def _check_required(ap: ArgParser, result: ParsedArgs, pos_defs: List[OptDef], pos_count: i64)
+    # Don't enforce requirements when help is requested
+    if has(result._flags, "help") and result._flags["help"] == 1
+        return
+    end
+
+    i: i64 = 0
+    while i < len(ap.defs)
+        d := ap.defs[i]
+        if d.required
+            if d.kind == OPT_OPTION and not has(result.values, d.name)
+                _die(ap, format("missing required option '--{}'", d.name))
+            end
+        end
+        i += 1
+    end
+    i = 0
+    while i < len(pos_defs)
+        d := pos_defs[i]
+        if d.required and i >= pos_count
+            _die(ap, format("missing required argument '{}'", d.name))
+        end
+        i += 1
+    end
+end
+
+def _die(ap: ArgParser, msg: str)
+    print(format("{}: error: {}", ap.prog, msg))
+    print(format("Try '{} --help' for more information.", ap.prog))
+    os.exit(1)
+end

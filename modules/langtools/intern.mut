@@ -1,0 +1,41 @@
+# intern.mut — String interning
+#
+# Deduplicate strings and assign integer IDs. Compare by ID instead of
+# string content. Speeds up symbol lookup in large codebases.
+#
+# Usage:
+#   import langtools.intern
+#   pool := intern.Interner()
+#   id_a := pool.intern("foo")
+#   id_b := pool.intern("foo")     # same ID as id_a
+#   print(id_a == id_b)            # true
+#   print(pool.get(id_a))          # foo
+#   print(pool.count())            # 1
+
+class Interner
+    ids: Dict[str, i64]
+    strs: List[str]
+
+    def init(self)
+        self.ids = Dict[str, i64]()
+        self.strs = List[str]()
+    end
+
+    def intern(self, s: str) -> i64
+        if has(self.ids, s)
+            return self.ids[s]
+        end
+        id := len(self.strs)
+        self.ids[s] = id
+        append(self.strs, s)
+        return id
+    end
+
+    def get(self, id: i64) -> str
+        return self.strs[id]
+    end
+
+    def count(self) -> i64
+        return len(self.strs)
+    end
+end

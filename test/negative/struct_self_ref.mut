@@ -1,0 +1,5 @@
+# ERROR: self-referential struct — infinite size
+struct Node
+    val: i64
+    next: Node
+end

@@ -1,0 +1,3 @@
+# Negative: missing 'end' to close function
+def foo() -> i64
+    return 42

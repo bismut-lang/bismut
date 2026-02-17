@@ -1,0 +1,1823 @@
+# parser.mut — Bismut language parser built on the Pratt parser toolkit
+#
+# Parses a Bismut token stream (from lexer) into an AST using pars.Node.
+# Usage:
+#   import lexer as mx
+#   import parser as mp
+#   tokens := mx.tokenize("<file>", source)
+#   prog := mp.parse("<file>", tokens)
+#   pars.dump_tree(prog, 0)
+
+extern string
+extern stringbuilder
+import langtools.lex
+import langtools.pars
+import langtools.sink
+import lexer as mx
+
+# ─── Module-level diagnostic state ───────────────────────────────────
+# Set by parse() before any parsing begins.
+
+_sink := sink.Sink()
+_file: str = ""
+
+def emit_error(tok: pars.Token, msg: str) -> pars.Node
+    _sink.error(_file, tok.line, tok.col, len(tok.lexeme), msg)
+    return pars.error_node(tok, msg)
+end
+
+# ─── Doc comment extraction ──────────────────────────────────────────
+# Finds consecutive standalone comments ending at (decl_line - 1).
+# Comments come from the lexer's side-channel (mx.get_comment_*).
+
+def _get_doc(decl_line: i64) -> str
+    count := mx.get_comment_count()
+    if count == 0
+        return ""
+    end
+    target := decl_line - 1
+    lines: List[str] = List[str]()
+    i := count - 1
+    while i >= 0
+        cl := mx.get_comment_line(i)
+        if cl == target
+            append(lines, mx.get_comment_text(i))
+            target -= 1
+        elif cl < target
+            break
+        end
+        i -= 1
+    end
+    if len(lines) == 0
+        return ""
+    end
+    # Reverse and join with newlines
+    sb := stringbuilder.new()
+    j := len(lines) - 1
+    while j >= 0
+        if j < len(lines) - 1
+            stringbuilder.append_str(sb, "\n")
+        end
+        stringbuilder.append_str(sb, lines[j])
+        j -= 1
+    end
+    return stringbuilder.build(sb)
+end
+
+# ─── AST node kinds ──────────────────────────────────────────────────
+# Built on pars.NodeKind.USER = 100.
+
+enum NodeKind
+    # Literals & atoms
+    INT_LIT = 100, FLOAT_LIT, STRING_LIT, CHAR_LIT, BOOL_LIT, NONE_LIT, IDENT
+
+    # Expressions
+    BINARY = 110, UNARY, CALL, INDEX, MEMBER, IS, AS
+    TUPLE_EXPR, LIST_LIT, DICT_LIT
+
+    # Type references
+    TYPE = 130, TYPE_LIST, TYPE_DICT, TYPE_TUPLE, TYPE_FN
+
+    # Statements
+    VAR_DECL = 150, ASSIGN, MEMBER_ASSIGN, INDEX_ASSIGN, EXPR_STMT
+    RETURN, BREAK, CONTINUE, BLOCK, TUPLE_DESTRUCT
+
+    # Control flow
+    IF = 170, IF_ARM, WHILE, FOR
+
+    # Declarations
+    FUNC_DECL = 190, PARAM, CLASS_DECL, STRUCT_DECL, INTERFACE_DECL
+    METHOD_SIG, FIELD_DECL, ENUM_DECL, ENUM_VARIANT, IMPORT, EXTERN, PROGRAM
+
+    # Modifiers
+    CONST_DECL = 220, STATIC_DECL, TYPE_PARAM
+end
+
+# ─── Operator precedence lookup ──────────────────────────────────────
+
+def op_bp(kind: i64) -> i64
+    # or -> 1
+    if kind == mx.TokenKind.KW_OR
+        return 2
+    end
+    # and -> 2
+    if kind == mx.TokenKind.KW_AND
+        return 4
+    end
+    # | -> 3
+    if kind == mx.TokenKind.PIPE
+        return 6
+    end
+    # ^ -> 4
+    if kind == mx.TokenKind.CARET
+        return 8
+    end
+    # & -> 5
+    if kind == mx.TokenKind.AMP
+        return 10
+    end
+    # == != -> 6
+    if kind == mx.TokenKind.EQ or kind == mx.TokenKind.NE
+        return 12
+    end
+    # < <= > >= is as -> 7
+    if kind == mx.TokenKind.LT or kind == mx.TokenKind.LE or kind == mx.TokenKind.GT or kind == mx.TokenKind.GE
+        return 14
+    end
+    if kind == mx.TokenKind.IS or kind == mx.TokenKind.AS
+        return 14
+    end
+    # << >> -> 8
+    if kind == mx.TokenKind.SHL or kind == mx.TokenKind.SHR
+        return 16
+    end
+    # + - -> 9
+    if kind == mx.TokenKind.PLUS or kind == mx.TokenKind.MINUS
+        return 18
+    end
+    # * / % -> 10
+    if kind == mx.TokenKind.STAR or kind == mx.TokenKind.SLASH or kind == mx.TokenKind.PERCENT
+        return 20
+    end
+    return 0
+end
+
+def is_binary_op(kind: i64) -> bool
+    return op_bp(kind) > 0 and kind != mx.TokenKind.IS and kind != mx.TokenKind.AS
+end
+
+# ─── Assignment operator detection ───────────────────────────────────
+
+def is_assign_op(kind: i64) -> bool
+    if kind == mx.TokenKind.ASSIGN
+        return True
+    end
+    if kind == mx.TokenKind.ADD_ASSIGN or kind == mx.TokenKind.SUB_ASSIGN
+        return True
+    end
+    if kind == mx.TokenKind.MUL_ASSIGN or kind == mx.TokenKind.DIV_ASSIGN or kind == mx.TokenKind.MOD_ASSIGN
+        return True
+    end
+    if kind == mx.TokenKind.BAND_ASSIGN or kind == mx.TokenKind.BOR_ASSIGN or kind == mx.TokenKind.XOR_ASSIGN
+        return True
+    end
+    if kind == mx.TokenKind.SHL_ASSIGN or kind == mx.TokenKind.SHR_ASSIGN
+        return True
+    end
+    return False
+end
+
+# ─── Generic name pre-scan ───────────────────────────────────────────
+
+def prescan_generics(tokens: List[pars.Token]) -> Dict[str, i64]
+    # Scan for `def IDENT [` patterns to find user-defined generic functions.
+    # Also include builtin generics. Value = 1 for presence.
+    names: Dict[str, i64] = Dict[str, i64]() {
+        "List": 1, "Dict": 1,
+        "append": 1, "get": 1, "set": 1,
+        "put": 1, "lookup": 1, "has": 1,
+        "keys": 1, "identity": 1
+    }
+    i: i64 = 0
+    limit := len(tokens) - 2
+    while i < limit
+        if tokens[i].kind == mx.TokenKind.DEF
+            if tokens[i + 1].kind == lex.TokenKind.IDENT
+                if tokens[i + 2].kind == mx.TokenKind.LBRACKET
+                    names[tokens[i + 1].lexeme] = 1
+                end
+            end
+        end
+        i += 1
+    end
+    return names
+end
+
+# ─── BismutRules: IParseRules for Bismut expressions ─────────────────
+
+class BismutRules : pars.IParseRules
+    generics: Dict[str, i64]
+
+    def init(self, generics: Dict[str, i64])
+        self.generics = generics
+    end
+
+    def nud(self, p: pars.Parser, tok: pars.Token) -> pars.Node
+        # Integer literal
+        if tok.kind == lex.TokenKind.INT
+            return pars.leaf(NodeKind.INT_LIT, tok)
+        end
+        # Float literal
+        if tok.kind == lex.TokenKind.FLOAT
+            return pars.leaf(NodeKind.FLOAT_LIT, tok)
+        end
+        # String literal
+        if tok.kind == lex.TokenKind.STRING
+            return pars.leaf(NodeKind.STRING_LIT, tok)
+        end
+        # Char literal
+        if tok.kind == lex.TokenKind.CHAR
+            return pars.leaf(NodeKind.CHAR_LIT, tok)
+        end
+        # True/False
+        if tok.kind == mx.TokenKind.TRUE or tok.kind == mx.TokenKind.FALSE
+            return pars.leaf(NodeKind.BOOL_LIT, tok)
+        end
+        # None
+        if tok.kind == mx.TokenKind.NONE
+            return pars.leaf(NodeKind.NONE_LIT, tok)
+        end
+        # Identifier
+        if tok.kind == lex.TokenKind.IDENT
+            return pars.leaf(NodeKind.IDENT, tok)
+        end
+        # Unary: not, -, ~
+        if tok.kind == mx.TokenKind.NOT or tok.kind == mx.TokenKind.MINUS or tok.kind == mx.TokenKind.TILDE
+            operand := p.expr(22)
+            return pars.unary(NodeKind.UNARY, tok, operand)
+        end
+        # Parenthesized expression or tuple
+        if tok.kind == mx.TokenKind.LPAREN
+            inner := p.expr(0)
+            if inner.is_error()
+                return inner
+            end
+            # Check for tuple: (a, b, ...)
+            if p.match_kind(mx.TokenKind.COMMA)
+                items: List[pars.Node] = List[pars.Node]()
+                append(items, inner)
+                while p.consume(mx.TokenKind.COMMA)
+                    if p.match_kind(mx.TokenKind.RPAREN)
+                        break
+                    end
+                    elem := p.expr(0)
+                    if elem.is_error()
+                        return elem
+                    end
+                    append(items, elem)
+                end
+                rp := p.expect(mx.TokenKind.RPAREN)
+                if rp.is_error()
+                    return emit_error(tok, "expected ')' to close tuple")
+                end
+                return pars.group(NodeKind.TUPLE_EXPR, tok, items)
+            end
+            rp := p.expect(mx.TokenKind.RPAREN)
+            if rp.is_error()
+                return emit_error(tok, "expected ')' to close expression")
+            end
+            return inner
+        end
+        return emit_error(tok, format("unexpected token '{}'", tok.lexeme))
+    end
+
+    def led(self, p: pars.Parser, left: pars.Node, tok: pars.Token) -> pars.Node
+        # Member access: expr.ident
+        if tok.kind == mx.TokenKind.DOT
+            mem := p.expect(lex.TokenKind.IDENT)
+            if mem.is_error()
+                return emit_error(tok, "expected identifier after '.'")
+            end
+            n := pars.Node(NodeKind.MEMBER, mem.lexeme, tok.line, tok.col)
+            n.add_child(left)
+            return n
+        end
+
+        # Call: expr(...)
+        if tok.kind == mx.TokenKind.LPAREN
+            return parse_call_args(p, left, tok, "")
+        end
+
+        # Index or generic call: expr[...]
+        if tok.kind == mx.TokenKind.LBRACKET
+            # Check if it's a generic call: ident[Type](...)
+            if left.kind == NodeKind.IDENT and has(self.generics, left.value)
+                tp := parse_type_ref(p)
+                if tp.is_error()
+                    return tp
+                end
+                # Check for second type param: Dict[K, V] style
+                tp_val := tp.value
+                if p.match_kind(mx.TokenKind.COMMA)
+                    p.advance()
+                    tp2 := parse_type_ref(p)
+                    if tp2.is_error()
+                        return tp2
+                    end
+                    tp_val = format("{},{}", tp.value, tp2.value)
+                end
+                cl := p.expect(mx.TokenKind.RBRACKET)
+                if cl.is_error()
+                    return emit_error(tok, "expected ']' after type param")
+                end
+                # Now expect '(' for the call
+                if p.match_kind(mx.TokenKind.LPAREN)
+                    lp := p.advance()
+                    call := parse_call_args(p, left, lp, tp_val)
+                    if call.is_error()
+                        return call
+                    end
+                    # Check for collection literal: List[T]() {...} or Dict[K, V]() {...}
+                    if call.child_count() == 1 and p.match_kind(mx.TokenKind.LBRACE)
+                        if left.value == "List"
+                            return parse_list_lit(p, call, tp.value)
+                        end
+                        if left.value == "Dict"
+                            return parse_dict_lit(p, call, tp_val)
+                        end
+                    end
+                    return call
+                end
+                # Just a generic type constructor like List[i64]()
+                return emit_error(tok, "expected '(' after generic type parameter")
+            end
+            # Regular subscript: expr[expr]
+            idx := p.expr(0)
+            if idx.is_error()
+                return idx
+            end
+            rb := p.expect(mx.TokenKind.RBRACKET)
+            if rb.is_error()
+                return emit_error(tok, "expected ']' to close subscript")
+            end
+            n := pars.Node(NodeKind.INDEX, "", tok.line, tok.col)
+            n.add_child(left)
+            n.add_child(idx)
+            return n
+        end
+
+        # is: expr is Type
+        if tok.kind == mx.TokenKind.IS
+            if p.match_kind(mx.TokenKind.NONE)
+                nt := p.advance()
+                n := pars.Node(NodeKind.IS, "None", tok.line, tok.col)
+                n.add_child(left)
+                return n
+            end
+            tp := parse_type_ref(p)
+            n := pars.Node(NodeKind.IS, tp.value, tok.line, tok.col)
+            n.add_child(left)
+            return n
+        end
+
+        # as: expr as Type
+        if tok.kind == mx.TokenKind.AS
+            tp := parse_type_ref(p)
+            n := pars.Node(NodeKind.AS, tp.value, tok.line, tok.col)
+            n.add_child(left)
+            return n
+        end
+
+        # Binary operators
+        if is_binary_op(tok.kind)
+            bp := op_bp(tok.kind)
+            right := p.expr(bp)
+            if right.is_error()
+                return right
+            end
+            return pars.binary(NodeKind.BINARY, tok, left, right)
+        end
+
+        return emit_error(tok, format("unexpected infix '{}'", tok.lexeme))
+    end
+
+    def lbp(self, kind: i64) -> i64
+        # Member access and call/index bind tightest
+        if kind == mx.TokenKind.DOT
+            return 100
+        end
+        if kind == mx.TokenKind.LPAREN
+            return 90
+        end
+        if kind == mx.TokenKind.LBRACKET
+            return 90
+        end
+        return op_bp(kind)
+    end
+
+    def has_nud(self, kind: i64) -> bool
+        if kind == lex.TokenKind.INT or kind == lex.TokenKind.FLOAT or kind == lex.TokenKind.STRING or kind == lex.TokenKind.CHAR
+            return True
+        end
+        if kind == lex.TokenKind.IDENT
+            return True
+        end
+        if kind == mx.TokenKind.TRUE or kind == mx.TokenKind.FALSE or kind == mx.TokenKind.NONE
+            return True
+        end
+        if kind == mx.TokenKind.NOT or kind == mx.TokenKind.MINUS or kind == mx.TokenKind.TILDE
+            return True
+        end
+        if kind == mx.TokenKind.LPAREN
+            return True
+        end
+        return False
+    end
+
+    def has_led(self, kind: i64) -> bool
+        if kind == mx.TokenKind.DOT or kind == mx.TokenKind.LPAREN or kind == mx.TokenKind.LBRACKET
+            return True
+        end
+        if kind == mx.TokenKind.IS or kind == mx.TokenKind.AS
+            return True
+        end
+        return is_binary_op(kind)
+    end
+end
+
+# ─── Helper: parse call arguments ────────────────────────────────────
+
+def parse_call_args(p: pars.Parser, callee: pars.Node, lp: pars.Token, type_param: str) -> pars.Node
+    n := pars.Node(NodeKind.CALL, type_param, lp.line, lp.col)
+    n.add_child(callee)
+    if not p.match_kind(mx.TokenKind.RPAREN)
+        arg := p.expr(0)
+        if arg.is_error()
+            return arg
+        end
+        n.add_child(arg)
+        while p.consume(mx.TokenKind.COMMA)
+            if p.match_kind(mx.TokenKind.RPAREN)
+                break
+            end
+            arg = p.expr(0)
+            if arg.is_error()
+                return arg
+            end
+            n.add_child(arg)
+        end
+    end
+    rp := p.expect(mx.TokenKind.RPAREN)
+    if rp.is_error()
+        return emit_error(lp, "expected ')' after call arguments")
+    end
+    return n
+end
+
+# ─── Collection literal parsing ──────────────────────────────────────
+
+def parse_list_lit(p: pars.Parser, call: pars.Node, elem_type: str) -> pars.Node
+    lb := p.advance()
+    n := pars.Node(NodeKind.LIST_LIT, elem_type, call.line, call.col)
+    skip_newlines(p)
+    if not p.match_kind(mx.TokenKind.RBRACE)
+        el := p.expr(0)
+        if el.is_error()
+            return el
+        end
+        n.add_child(el)
+        while p.consume(mx.TokenKind.COMMA)
+            skip_newlines(p)
+            if p.match_kind(mx.TokenKind.RBRACE)
+                break
+            end
+            el = p.expr(0)
+            if el.is_error()
+                return el
+            end
+            n.add_child(el)
+        end
+    end
+    skip_newlines(p)
+    rb := p.expect(mx.TokenKind.RBRACE)
+    if rb.is_error()
+        return emit_error(lb, "expected '}' after list literal elements")
+    end
+    return n
+end
+
+def parse_dict_lit(p: pars.Parser, call: pars.Node, val_type: str) -> pars.Node
+    lb := p.advance()
+    n := pars.Node(NodeKind.DICT_LIT, val_type, call.line, call.col)
+    skip_newlines(p)
+    if not p.match_kind(mx.TokenKind.RBRACE)
+        key := p.expr(0)
+        if key.is_error()
+            return key
+        end
+        colon := p.expect(mx.TokenKind.COLON)
+        if colon.is_error()
+            return emit_error(lb, "expected ':' after dict key")
+        end
+        val := p.expr(0)
+        if val.is_error()
+            return val
+        end
+        n.add_child(key)
+        n.add_child(val)
+        while p.consume(mx.TokenKind.COMMA)
+            skip_newlines(p)
+            if p.match_kind(mx.TokenKind.RBRACE)
+                break
+            end
+            key = p.expr(0)
+            if key.is_error()
+                return key
+            end
+            colon = p.expect(mx.TokenKind.COLON)
+            if colon.is_error()
+                return emit_error(lb, "expected ':' after dict key")
+            end
+            val = p.expr(0)
+            if val.is_error()
+                return val
+            end
+            n.add_child(key)
+            n.add_child(val)
+        end
+    end
+    skip_newlines(p)
+    rb := p.expect(mx.TokenKind.RBRACE)
+    if rb.is_error()
+        return emit_error(lb, "expected '}' after dict literal entries")
+    end
+    return n
+end
+
+# ─── Type reference parsing ──────────────────────────────────────────
+
+def parse_type_ref(p: pars.Parser) -> pars.Node
+    # Tuple type: (T1, T2)
+    if p.match_kind(mx.TokenKind.LPAREN)
+        lp := p.advance()
+        types: List[pars.Node] = List[pars.Node]()
+        first := parse_type_ref(p)
+        if first.is_error()
+            return first
+        end
+        append(types, first)
+        while p.consume(mx.TokenKind.COMMA)
+            t := parse_type_ref(p)
+            if t.is_error()
+                return t
+            end
+            append(types, t)
+        end
+        rp := p.expect(mx.TokenKind.RPAREN)
+        if rp.is_error()
+            return emit_error(lp, "expected ')' in tuple type")
+        end
+        return pars.group(NodeKind.TYPE_TUPLE, lp, types)
+    end
+
+    tok := p.expect(lex.TokenKind.IDENT)
+    if tok.is_error()
+        return emit_error(tok, "expected type name")
+    end
+
+    name := tok.lexeme
+
+    # Fn(T1, T2) -> R function pointer type
+    if name == "Fn" and p.match_kind(mx.TokenKind.LPAREN)
+        p.advance()
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, "Fn(")
+        if not p.match_kind(mx.TokenKind.RPAREN)
+            pt := parse_type_ref(p)
+            stringbuilder.append_str(sb, pt.value)
+            while p.consume(mx.TokenKind.COMMA)
+                stringbuilder.append_str(sb, ",")
+                pt = parse_type_ref(p)
+                stringbuilder.append_str(sb, pt.value)
+            end
+        end
+        rp := p.expect(mx.TokenKind.RPAREN)
+        if rp.is_error()
+            return emit_error(tok, "expected ')' in Fn type")
+        end
+        stringbuilder.append_str(sb, ")->")
+        if p.consume(mx.TokenKind.ARROW)
+            rt := parse_type_ref(p)
+            stringbuilder.append_str(sb, rt.value)
+        else
+            stringbuilder.append_str(sb, "void")
+        end
+        return pars.Node(NodeKind.TYPE_FN, stringbuilder.build(sb), tok.line, tok.col)
+    end
+
+    # Dotted type: module.Type
+    if p.match_kind(mx.TokenKind.DOT)
+        p.advance()
+        mem := p.expect(lex.TokenKind.IDENT)
+        if mem.is_error()
+            return emit_error(tok, "expected type name after '.'")
+        end
+        name = string.concat(string.concat(name, "__"), mem.lexeme)
+    end
+
+    # List[T] or Dict[K, V]
+    if (name == "List" or name == "Dict") and p.match_kind(mx.TokenKind.LBRACKET)
+        p.advance()
+        inner := parse_type_ref(p)
+        if inner.is_error()
+            return inner
+        end
+        if name == "Dict"
+            cm := p.expect(mx.TokenKind.COMMA)
+            if cm.is_error()
+                return emit_error(tok, "expected ',' between Dict key and value types")
+            end
+            val_ref := parse_type_ref(p)
+            if val_ref.is_error()
+                return val_ref
+            end
+            rb := p.expect(mx.TokenKind.RBRACKET)
+            if rb.is_error()
+                return emit_error(tok, "expected ']' in generic type")
+            end
+            sb := stringbuilder.new()
+            stringbuilder.append_str(sb, "Dict[")
+            stringbuilder.append_str(sb, inner.value)
+            stringbuilder.append_str(sb, ",")
+            stringbuilder.append_str(sb, val_ref.value)
+            stringbuilder.append_str(sb, "]")
+            return pars.Node(NodeKind.TYPE_DICT, stringbuilder.build(sb), tok.line, tok.col)
+        end
+        rb := p.expect(mx.TokenKind.RBRACKET)
+        if rb.is_error()
+            return emit_error(tok, "expected ']' in generic type")
+        end
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, "List[")
+        stringbuilder.append_str(sb, inner.value)
+        stringbuilder.append_str(sb, "]")
+        return pars.Node(NodeKind.TYPE_LIST, stringbuilder.build(sb), tok.line, tok.col)
+    end
+
+    return pars.Node(NodeKind.TYPE, name, tok.line, tok.col)
+end
+
+# ─── Newline utilities ───────────────────────────────────────────────
+
+def skip_newlines(p: pars.Parser)
+    while p.match_kind(lex.TokenKind.NEWLINE)
+        p.advance()
+    end
+end
+
+def expect_stmt_end(p: pars.Parser) -> bool
+    if p.consume(mx.TokenKind.SEMI)
+        skip_newlines(p)
+        return True
+    end
+    if p.consume(lex.TokenKind.NEWLINE)
+        skip_newlines(p)
+        return True
+    end
+    # At EOF, it's fine
+    if p.at_end()
+        return True
+    end
+    return False
+end
+
+# ─── Parameter parsing ───────────────────────────────────────────────
+
+def parse_param(p: pars.Parser) -> pars.Node
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(name, "expected parameter name")
+    end
+    # self doesn't need a type annotation
+    if name.lexeme == "self"
+        n := pars.Node(NodeKind.PARAM, "self", name.line, name.col)
+        n.file = _file
+        ty := pars.Node(NodeKind.TYPE, "Self", name.line, name.col)
+        n.add_child(ty)
+        return n
+    end
+    cl := p.expect(mx.TokenKind.COLON)
+    if cl.is_error()
+        return emit_error(name, "expected ':' after parameter name")
+    end
+    ty := parse_type_ref(p)
+    if ty.is_error()
+        return ty
+    end
+    n := pars.Node(NodeKind.PARAM, name.lexeme, name.line, name.col)
+    n.file = _file
+    n.add_child(ty)
+    return n
+end
+
+# ─── Block parsing ───────────────────────────────────────────────────
+
+def is_block_end(kind: i64) -> bool
+    if kind == mx.TokenKind.END or kind == mx.TokenKind.ELIF or kind == mx.TokenKind.ELSE
+        return True
+    end
+    if kind == lex.TokenKind.EOF
+        return True
+    end
+    return False
+end
+
+def parse_block(p: pars.Parser, rules: BismutRules) -> pars.Node
+    tok := p.current()
+    n := pars.Node(NodeKind.BLOCK, "", tok.line, tok.col)
+    skip_newlines(p)
+    while not p.at_end() and not is_block_end(p.peek())
+        stmt := parse_stmt(p, rules)
+        n.add_child(stmt)
+        if stmt.is_error()
+            return stmt
+        end
+        skip_newlines(p)
+    end
+    return n
+end
+
+# ─── Expression parsing (using Pratt parser) ─────────────────────────
+
+def parse_expr(p: pars.Parser) -> pars.Node
+    result := p.expr(0)
+    if result.is_error()
+        _sink.error(_file, result.line, result.col, 1, result.value)
+    end
+    return result
+end
+
+# ─── Statement parsing ───────────────────────────────────────────────
+
+def parse_stmt(p: pars.Parser, rules: BismutRules) -> pars.Node
+    kind := p.peek()
+
+    # if
+    if kind == mx.TokenKind.IF
+        return parse_if(p, rules)
+    end
+
+    # while
+    if kind == mx.TokenKind.WHILE
+        return parse_while(p, rules)
+    end
+
+    # for
+    if kind == mx.TokenKind.FOR
+        return parse_for(p, rules)
+    end
+
+    # return
+    if kind == mx.TokenKind.RETURN
+        return parse_return(p)
+    end
+
+    # break
+    if kind == mx.TokenKind.BREAK
+        tok := p.advance()
+        expect_stmt_end(p)
+        return pars.leaf(NodeKind.BREAK, tok)
+    end
+
+    # continue
+    if kind == mx.TokenKind.CONTINUE
+        tok := p.advance()
+        expect_stmt_end(p)
+        return pars.leaf(NodeKind.CONTINUE, tok)
+    end
+
+    # nested def is an error
+    if kind == mx.TokenKind.DEF
+        tok := p.current()
+        return emit_error(tok, "function declarations only allowed at top level or in class/struct")
+    end
+
+    # tuple destructure: ident, ident ... :=
+    if kind == lex.TokenKind.IDENT and p.peek_at(1) == mx.TokenKind.COMMA
+        return parse_tuple_destruct(p)
+    end
+
+    # const: const name: type = expr
+    if kind == mx.TokenKind.CONST
+        kw := p.advance()
+        decl := parse_var_decl(p)
+        if decl.is_error()
+            return decl
+        end
+        decl.kind = NodeKind.CONST_DECL
+        return decl
+    end
+
+    # static: static name: type = expr
+    if kind == mx.TokenKind.STATIC
+        kw := p.advance()
+        decl := parse_var_decl(p)
+        if decl.is_error()
+            return decl
+        end
+        decl.kind = NodeKind.STATIC_DECL
+        return decl
+    end
+
+    # walrus: ident :=
+    if kind == lex.TokenKind.IDENT and p.peek_at(1) == mx.TokenKind.WALRUS
+        return parse_walrus_decl(p)
+    end
+
+    # typed var decl: ident : type = expr
+    if kind == lex.TokenKind.IDENT and p.peek_at(1) == mx.TokenKind.COLON
+        return parse_var_decl(p)
+    end
+
+    # Simple member assign: ident.ident op= expr
+    if kind == lex.TokenKind.IDENT and p.peek_at(1) == mx.TokenKind.DOT and p.peek_at(2) == lex.TokenKind.IDENT and is_assign_op(p.peek_at(3))
+        return parse_simple_member_assign(p)
+    end
+
+    # Simple assignment: ident op= expr
+    if kind == lex.TokenKind.IDENT and is_assign_op(p.peek_at(1))
+        return parse_assign(p)
+    end
+
+    # Expression statement (may be followed by subscript/member assign)
+    expr := parse_expr(p)
+    if expr.is_error()
+        return expr
+    end
+
+    # Subscript assignment: expr[idx] op= val
+    if expr.kind == NodeKind.INDEX and is_assign_op(p.peek())
+        op := p.advance()
+        val := parse_expr(p)
+        if val.is_error()
+            return val
+        end
+        expect_stmt_end(p)
+        n := pars.Node(NodeKind.INDEX_ASSIGN, op.lexeme, op.line, op.col)
+        # children: obj, index, value
+        n.add_child(expr.child(0))
+        n.add_child(expr.child(1))
+        n.add_child(val)
+        return n
+    end
+
+    # Chained member assignment: expr.member op= val
+    if expr.kind == NodeKind.MEMBER and is_assign_op(p.peek())
+        op := p.advance()
+        val := parse_expr(p)
+        if val.is_error()
+            return val
+        end
+        expect_stmt_end(p)
+        n := pars.Node(NodeKind.MEMBER_ASSIGN, op.lexeme, op.line, op.col)
+        # children: obj, value; member name in the expr.value
+        n.add_child(expr)
+        n.add_child(val)
+        return n
+    end
+
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.EXPR_STMT, "", expr.line, expr.col)
+    n.add_child(expr)
+    return n
+end
+
+# ─── Variable declarations ───────────────────────────────────────────
+
+def parse_var_decl(p: pars.Parser) -> pars.Node
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(name, "expected variable name")
+    end
+    cl := p.expect(mx.TokenKind.COLON)
+    if cl.is_error()
+        return emit_error(name, "expected ':' in variable declaration")
+    end
+    ty := parse_type_ref(p)
+    if ty.is_error()
+        return ty
+    end
+    eq := p.expect(mx.TokenKind.ASSIGN)
+    if eq.is_error()
+        return emit_error(name, "expected '=' in variable declaration")
+    end
+    val := parse_expr(p)
+    if val.is_error()
+        return val
+    end
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.VAR_DECL, name.lexeme, name.line, name.col)
+    n.file = _file
+    n.add_child(ty)
+    n.add_child(val)
+    return n
+end
+
+def parse_walrus_decl(p: pars.Parser) -> pars.Node
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(name, "expected variable name")
+    end
+    w := p.expect(mx.TokenKind.WALRUS)
+    if w.is_error()
+        return emit_error(name, "expected ':='")
+    end
+    val := parse_expr(p)
+    if val.is_error()
+        return val
+    end
+    expect_stmt_end(p)
+    # walrus decl has no type child — just value
+    n := pars.Node(NodeKind.VAR_DECL, name.lexeme, name.line, name.col)
+    n.file = _file
+    n.add_child(val)
+    return n
+end
+
+def parse_tuple_destruct(p: pars.Parser) -> pars.Node
+    first := p.expect(lex.TokenKind.IDENT)
+    if first.is_error()
+        return emit_error(first, "expected variable name")
+    end
+    names: List[pars.Node] = List[pars.Node]()
+    append(names, pars.leaf(NodeKind.IDENT, first))
+    while p.consume(mx.TokenKind.COMMA)
+        nm := p.expect(lex.TokenKind.IDENT)
+        if nm.is_error()
+            return emit_error(nm, "expected variable name in destructuring")
+        end
+        append(names, pars.leaf(NodeKind.IDENT, nm))
+    end
+    w := p.expect(mx.TokenKind.WALRUS)
+    if w.is_error()
+        return emit_error(first, "expected ':=' in tuple destructuring")
+    end
+    val := parse_expr(p)
+    if val.is_error()
+        return val
+    end
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.TUPLE_DESTRUCT, "", first.line, first.col)
+    i: i64 = 0
+    while i < len(names)
+        n.add_child(names[i])
+        i += 1
+    end
+    n.add_child(val)
+    return n
+end
+
+# ─── Assignment statements ───────────────────────────────────────────
+
+def parse_assign(p: pars.Parser) -> pars.Node
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(name, "expected variable name")
+    end
+    op := p.advance()
+    val := parse_expr(p)
+    if val.is_error()
+        return val
+    end
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.ASSIGN, op.lexeme, op.line, op.col)
+    n.add_child(pars.leaf(NodeKind.IDENT, name))
+    n.add_child(val)
+    return n
+end
+
+def parse_simple_member_assign(p: pars.Parser) -> pars.Node
+    obj := p.expect(lex.TokenKind.IDENT)
+    if obj.is_error()
+        return emit_error(obj, "expected object name")
+    end
+    p.advance()  # consume '.'
+    mem := p.expect(lex.TokenKind.IDENT)
+    if mem.is_error()
+        return emit_error(obj, "expected member name")
+    end
+    op := p.advance()
+    val := parse_expr(p)
+    if val.is_error()
+        return val
+    end
+    expect_stmt_end(p)
+
+    # Build member access node
+    obj_node := pars.leaf(NodeKind.IDENT, obj)
+    mem_node := pars.Node(NodeKind.MEMBER, mem.lexeme, mem.line, mem.col)
+    mem_node.add_child(obj_node)
+
+    n := pars.Node(NodeKind.MEMBER_ASSIGN, op.lexeme, op.line, op.col)
+    n.add_child(mem_node)
+    n.add_child(val)
+    return n
+end
+
+# ─── Return ──────────────────────────────────────────────────────────
+
+def parse_return(p: pars.Parser) -> pars.Node
+    kw := p.advance()  # consume 'return'
+    # Check for empty return
+    if p.match_kind(lex.TokenKind.NEWLINE) or p.match_kind(mx.TokenKind.SEMI) or p.at_end()
+        expect_stmt_end(p)
+        return pars.Node(NodeKind.RETURN, "", kw.line, kw.col)
+    end
+    val := parse_expr(p)
+    if val.is_error()
+        return val
+    end
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.RETURN, "", kw.line, kw.col)
+    n.add_child(val)
+    return n
+end
+
+# ─── Control flow ────────────────────────────────────────────────────
+
+def parse_if(p: pars.Parser, rules: BismutRules) -> pars.Node
+    kw := p.advance()  # consume 'if'
+    cond := parse_expr(p)
+    if cond.is_error()
+        return cond
+    end
+    expect_stmt_end(p)
+    body := parse_block(p, rules)
+
+    n := pars.Node(NodeKind.IF, "", kw.line, kw.col)
+
+    # if arm
+    arm := pars.Node(NodeKind.IF_ARM, "if", kw.line, kw.col)
+    arm.add_child(cond)
+    arm.add_child(body)
+    n.add_child(arm)
+
+    # elif arms
+    while p.match_kind(mx.TokenKind.ELIF)
+        ek := p.advance()
+        ec := parse_expr(p)
+        if ec.is_error()
+            return ec
+        end
+        expect_stmt_end(p)
+        eb := parse_block(p, rules)
+        ea := pars.Node(NodeKind.IF_ARM, "elif", ek.line, ek.col)
+        ea.add_child(ec)
+        ea.add_child(eb)
+        n.add_child(ea)
+    end
+
+    # else arm
+    if p.match_kind(mx.TokenKind.ELSE)
+        el := p.advance()
+        expect_stmt_end(p)
+        eb := parse_block(p, rules)
+        ea := pars.Node(NodeKind.IF_ARM, "else", el.line, el.col)
+        ea.add_child(eb)
+        n.add_child(ea)
+    end
+
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close if")
+    end
+    expect_stmt_end(p)
+    return n
+end
+
+def parse_while(p: pars.Parser, rules: BismutRules) -> pars.Node
+    kw := p.advance()  # consume 'while'
+    cond := parse_expr(p)
+    if cond.is_error()
+        return cond
+    end
+    expect_stmt_end(p)
+    body := parse_block(p, rules)
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close while")
+    end
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.WHILE, "", kw.line, kw.col)
+    n.add_child(cond)
+    n.add_child(body)
+    return n
+end
+
+def parse_for(p: pars.Parser, rules: BismutRules) -> pars.Node
+    kw := p.advance()  # consume 'for'
+    var_tok := p.expect(lex.TokenKind.IDENT)
+    if var_tok.is_error()
+        return emit_error(kw, "expected loop variable")
+    end
+    cl := p.expect(mx.TokenKind.COLON)
+    if cl.is_error()
+        return emit_error(kw, "expected ':' after loop variable")
+    end
+    var_ty := parse_type_ref(p)
+    if var_ty.is_error()
+        return var_ty
+    end
+    in_tok := p.expect(mx.TokenKind.IN)
+    if in_tok.is_error()
+        return emit_error(kw, "expected 'in' after loop variable type")
+    end
+    iter := parse_expr(p)
+    if iter.is_error()
+        return iter
+    end
+    expect_stmt_end(p)
+    body := parse_block(p, rules)
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close for")
+    end
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.FOR, var_tok.lexeme, kw.line, kw.col)
+    n.add_child(var_ty)
+    n.add_child(iter)
+    n.add_child(body)
+    return n
+end
+
+# ─── Declaration parsing ─────────────────────────────────────────────
+
+def parse_func_decl(p: pars.Parser, rules: BismutRules) -> pars.Node
+    kw := p.advance()  # consume 'def'
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(kw, "expected function name")
+    end
+
+    n := pars.Node(NodeKind.FUNC_DECL, name.lexeme, kw.line, kw.col)
+    n.file = _file
+    n.doc = _get_doc(kw.line)
+
+    # Optional type parameters: def name[T, U](...)
+    if p.match_kind(mx.TokenKind.LBRACKET)
+        p.advance()
+        while True
+            tp := p.expect(lex.TokenKind.IDENT)
+            if tp.is_error()
+                return emit_error(kw, "expected type parameter name")
+            end
+            tpn := pars.Node(NodeKind.TYPE_PARAM, tp.lexeme, tp.line, tp.col)
+            n.add_child(tpn)
+            if not p.consume(mx.TokenKind.COMMA)
+                break
+            end
+        end
+        rb := p.expect(mx.TokenKind.RBRACKET)
+        if rb.is_error()
+            return emit_error(kw, "expected ']' after type parameters")
+        end
+    end
+
+    lp := p.expect(mx.TokenKind.LPAREN)
+    if lp.is_error()
+        return emit_error(kw, "expected '(' after function name")
+    end
+
+    # Parameters node
+    params := pars.Node(NodeKind.BLOCK, "params", kw.line, kw.col)
+    if not p.match_kind(mx.TokenKind.RPAREN)
+        while True
+            param := parse_param(p)
+            if param.is_error()
+                return param
+            end
+            params.add_child(param)
+            if not p.consume(mx.TokenKind.COMMA)
+                break
+            end
+        end
+    end
+    rp := p.expect(mx.TokenKind.RPAREN)
+    if rp.is_error()
+        return emit_error(kw, "expected ')' after parameters")
+    end
+    n.add_child(params)
+
+    # Return type
+    if p.consume(mx.TokenKind.ARROW)
+        ret := parse_type_ref(p)
+        if ret.is_error()
+            return ret
+        end
+        n.add_child(ret)
+    else
+        vt := pars.Node(NodeKind.TYPE, "void", kw.line, kw.col)
+        n.add_child(vt)
+    end
+
+    expect_stmt_end(p)
+
+    # Body
+    body := parse_block(p, rules)
+    n.add_child(body)
+
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close function")
+    end
+    expect_stmt_end(p)
+    return n
+end
+
+def parse_class_decl(p: pars.Parser, rules: BismutRules) -> pars.Node
+    kw := p.advance()  # consume 'class'
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(kw, "expected class name")
+    end
+
+    n := pars.Node(NodeKind.CLASS_DECL, name.lexeme, kw.line, kw.col)
+    n.file = _file
+    n.doc = _get_doc(kw.line)
+
+    # Optional implements: class Foo : IBar, IBaz
+    if p.match_kind(mx.TokenKind.COLON)
+        p.advance()
+        while True
+            iface := p.expect(lex.TokenKind.IDENT)
+            if iface.is_error()
+                return emit_error(kw, "expected interface name")
+            end
+            iname := iface.lexeme
+            # Dotted: mod.IFace
+            if p.match_kind(mx.TokenKind.DOT)
+                p.advance()
+                mem := p.expect(lex.TokenKind.IDENT)
+                if mem.is_error()
+                    return emit_error(kw, "expected interface name after '.'")
+                end
+                iname = string.concat(string.concat(iname, "__"), mem.lexeme)
+            end
+            inode := pars.Node(NodeKind.TYPE, iname, iface.line, iface.col)
+            n.add_child(inode)
+            if not p.consume(mx.TokenKind.COMMA)
+                break
+            end
+        end
+    end
+
+    expect_stmt_end(p)
+    skip_newlines(p)
+
+    # Fields and methods
+    while not p.at_end() and p.peek() != mx.TokenKind.END
+        if p.peek() == mx.TokenKind.DEF
+            method := parse_func_decl(p, rules)
+            if method.is_error()
+                return method
+            end
+            n.add_child(method)
+        elif p.peek() == lex.TokenKind.IDENT and p.peek_at(1) == mx.TokenKind.COLON
+            field := parse_field_decl(p)
+            if field.is_error()
+                return field
+            end
+            n.add_child(field)
+        else
+            return emit_error(p.current(), "expected field or method in class")
+        end
+        skip_newlines(p)
+    end
+
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close class")
+    end
+    expect_stmt_end(p)
+    return n
+end
+
+def parse_struct_decl(p: pars.Parser, rules: BismutRules) -> pars.Node
+    kw := p.advance()  # consume 'struct'
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(kw, "expected struct name")
+    end
+
+    n := pars.Node(NodeKind.STRUCT_DECL, name.lexeme, kw.line, kw.col)
+    n.file = _file
+    n.doc = _get_doc(kw.line)
+    expect_stmt_end(p)
+    skip_newlines(p)
+
+    while not p.at_end() and p.peek() != mx.TokenKind.END
+        if p.peek() == mx.TokenKind.DEF
+            method := parse_func_decl(p, rules)
+            if method.is_error()
+                return method
+            end
+            n.add_child(method)
+        elif p.peek() == lex.TokenKind.IDENT and p.peek_at(1) == mx.TokenKind.COLON
+            field := parse_field_decl(p)
+            if field.is_error()
+                return field
+            end
+            n.add_child(field)
+        else
+            return emit_error(p.current(), "expected field or method in struct")
+        end
+        skip_newlines(p)
+    end
+
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close struct")
+    end
+    expect_stmt_end(p)
+    return n
+end
+
+def parse_field_decl(p: pars.Parser) -> pars.Node
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(name, "expected field name")
+    end
+    cl := p.expect(mx.TokenKind.COLON)
+    if cl.is_error()
+        return emit_error(name, "expected ':' after field name")
+    end
+    ty := parse_type_ref(p)
+    if ty.is_error()
+        return ty
+    end
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.FIELD_DECL, name.lexeme, name.line, name.col)
+    n.file = _file
+    n.add_child(ty)
+    return n
+end
+
+def parse_interface_decl(p: pars.Parser) -> pars.Node
+    kw := p.advance()  # consume 'interface'
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(kw, "expected interface name")
+    end
+
+    n := pars.Node(NodeKind.INTERFACE_DECL, name.lexeme, kw.line, kw.col)
+    n.file = _file
+    n.doc = _get_doc(kw.line)
+    expect_stmt_end(p)
+    skip_newlines(p)
+
+    while not p.at_end() and p.peek() != mx.TokenKind.END
+        if p.peek() == mx.TokenKind.DEF
+            sig := parse_method_sig(p)
+            if sig.is_error()
+                return sig
+            end
+            n.add_child(sig)
+        else
+            return emit_error(p.current(), "expected method signature in interface")
+        end
+        skip_newlines(p)
+    end
+
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close interface")
+    end
+    expect_stmt_end(p)
+    return n
+end
+
+def parse_method_sig(p: pars.Parser) -> pars.Node
+    kw := p.advance()  # consume 'def'
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(kw, "expected method name")
+    end
+    lp := p.expect(mx.TokenKind.LPAREN)
+    if lp.is_error()
+        return emit_error(kw, "expected '(' after method name")
+    end
+
+    n := pars.Node(NodeKind.METHOD_SIG, name.lexeme, kw.line, kw.col)
+    n.file = _file
+
+    # Parameters
+    params := pars.Node(NodeKind.BLOCK, "params", kw.line, kw.col)
+    if not p.match_kind(mx.TokenKind.RPAREN)
+        while True
+            param := parse_param(p)
+            if param.is_error()
+                return param
+            end
+            params.add_child(param)
+            if not p.consume(mx.TokenKind.COMMA)
+                break
+            end
+        end
+    end
+    rp := p.expect(mx.TokenKind.RPAREN)
+    if rp.is_error()
+        return emit_error(kw, "expected ')' after parameters")
+    end
+    n.add_child(params)
+
+    # Return type
+    if p.consume(mx.TokenKind.ARROW)
+        ret := parse_type_ref(p)
+        if ret.is_error()
+            return ret
+        end
+        n.add_child(ret)
+    else
+        vt := pars.Node(NodeKind.TYPE, "void", kw.line, kw.col)
+        n.add_child(vt)
+    end
+
+    expect_stmt_end(p)
+    return n
+end
+
+def parse_enum_decl(p: pars.Parser) -> pars.Node
+    kw := p.advance()  # consume 'enum'
+    name := p.expect(lex.TokenKind.IDENT)
+    if name.is_error()
+        return emit_error(kw, "expected enum name")
+    end
+
+    n := pars.Node(NodeKind.ENUM_DECL, name.lexeme, kw.line, kw.col)
+    n.file = _file
+    n.doc = _get_doc(kw.line)
+    skip_newlines(p)
+
+    while p.peek() != mx.TokenKind.END and not p.at_end()
+        vtok := p.expect(lex.TokenKind.IDENT)
+        if vtok.is_error()
+            return emit_error(kw, "expected enum variant name")
+        end
+        v := pars.Node(NodeKind.ENUM_VARIANT, vtok.lexeme, vtok.line, vtok.col)
+        v.file = _file
+        # Optional value: = N or = -N
+        if p.match_kind(mx.TokenKind.ASSIGN)
+            p.advance()
+            # Check for negative
+            neg: bool = False
+            if p.match_kind(mx.TokenKind.MINUS)
+                p.advance()
+                neg = True
+            end
+            num := p.expect(lex.TokenKind.INT)
+            if num.is_error()
+                return emit_error(vtok, "expected integer value for enum variant")
+            end
+            val_str := num.lexeme
+            if neg
+                val_str = string.concat("-", val_str)
+            end
+            val_node := pars.Node(NodeKind.INT_LIT, val_str, num.line, num.col)
+            v.add_child(val_node)
+        end
+        n.add_child(v)
+        if not p.consume(mx.TokenKind.COMMA)
+            skip_newlines(p)
+        end
+    end
+
+    end_tok := p.expect(mx.TokenKind.END)
+    if end_tok.is_error()
+        return emit_error(kw, "expected 'end' to close enum")
+    end
+    expect_stmt_end(p)
+    return n
+end
+
+def parse_import(p: pars.Parser) -> pars.Node
+    kw := p.advance()  # consume 'import'
+    mod_tok := p.expect(lex.TokenKind.IDENT)
+    if mod_tok.is_error()
+        return emit_error(kw, "expected module name")
+    end
+
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, mod_tok.lexeme)
+    last := mod_tok.lexeme
+
+    while p.consume(mx.TokenKind.DOT)
+        part := p.expect(lex.TokenKind.IDENT)
+        if part.is_error()
+            return emit_error(kw, "expected module name after '.'")
+        end
+        stringbuilder.append_str(sb, ".")
+        stringbuilder.append_str(sb, part.lexeme)
+        last = part.lexeme
+    end
+
+    module := stringbuilder.build(sb)
+    alias := last
+
+    if p.match_kind(mx.TokenKind.AS)
+        p.advance()
+        alias_tok := p.expect(lex.TokenKind.IDENT)
+        if alias_tok.is_error()
+            return emit_error(kw, "expected alias after 'as'")
+        end
+        alias = alias_tok.lexeme
+    end
+
+    expect_stmt_end(p)
+    # value = module path, children[0] = alias (if different, stored in node)
+    n := pars.Node(NodeKind.IMPORT, module, kw.line, kw.col)
+    al := pars.Node(NodeKind.IDENT, alias, kw.line, kw.col)
+    n.add_child(al)
+    return n
+end
+
+def parse_extern_decl(p: pars.Parser) -> pars.Node
+    kw := p.advance()  # consume 'extern'
+    name_tok := p.expect(lex.TokenKind.IDENT)
+    if name_tok.is_error()
+        return emit_error(kw, "expected library name")
+    end
+
+    alias := name_tok.lexeme
+    if p.match_kind(mx.TokenKind.AS)
+        p.advance()
+        alias_tok := p.expect(lex.TokenKind.IDENT)
+        if alias_tok.is_error()
+            return emit_error(kw, "expected alias after 'as'")
+        end
+        alias = alias_tok.lexeme
+    end
+
+    expect_stmt_end(p)
+    n := pars.Node(NodeKind.EXTERN, name_tok.lexeme, kw.line, kw.col)
+    al := pars.Node(NodeKind.IDENT, alias, kw.line, kw.col)
+    n.add_child(al)
+    return n
+end
+
+# ─── Top-level program parsing ───────────────────────────────────────
+
+def parse(file: str, source: str, s: sink.Sink) -> pars.Node
+    _sink = s
+    _file = file
+    # Tokenize using lexer, then convert to pars.Token list
+    lex_tokens := mx.tokenize(file, source, s)
+    ptokens: List[pars.Token] = List[pars.Token]()
+    i: i64 = 0
+    while i < len(lex_tokens)
+        t := lex_tokens[i]
+        # Skip EOF — pars.Parser synthesizes EOF when pos >= length
+        if t.kind != lex.TokenKind.EOF
+            append(ptokens, pars.Token(t.kind, t.lexeme, t.line, t.col))
+        end
+        i += 1
+    end
+
+    generics := prescan_generics(ptokens)
+    rules := BismutRules(generics)
+    p := pars.Parser(file, ptokens, rules)
+
+    prog := pars.Node(NodeKind.PROGRAM, file, 1, 1)
+    prog.file = _file
+
+    skip_newlines(p)
+
+    # Parse imports and externs first
+    while not p.at_end()
+        if p.match_kind(mx.TokenKind.IMPORT)
+            imp := parse_import(p)
+            if imp.is_error()
+                return imp
+            end
+            prog.add_child(imp)
+        elif p.match_kind(mx.TokenKind.EXTERN)
+            ext := parse_extern_decl(p)
+            if ext.is_error()
+                return ext
+            end
+            prog.add_child(ext)
+        else
+            break
+        end
+        skip_newlines(p)
+    end
+
+    # Parse declarations and top-level statements
+    while not p.at_end()
+        kind := p.peek()
+        if kind == mx.TokenKind.DEF
+            fd := parse_func_decl(p, rules)
+            if fd.is_error()
+                return fd
+            end
+            prog.add_child(fd)
+        elif kind == mx.TokenKind.CLASS
+            cd := parse_class_decl(p, rules)
+            if cd.is_error()
+                return cd
+            end
+            prog.add_child(cd)
+        elif kind == mx.TokenKind.STRUCT
+            sd := parse_struct_decl(p, rules)
+            if sd.is_error()
+                return sd
+            end
+            prog.add_child(sd)
+        elif kind == mx.TokenKind.INTERFACE
+            id := parse_interface_decl(p)
+            if id.is_error()
+                return id
+            end
+            prog.add_child(id)
+        elif kind == mx.TokenKind.ENUM
+            ed := parse_enum_decl(p)
+            if ed.is_error()
+                return ed
+            end
+            prog.add_child(ed)
+        else
+            stmt := parse_stmt(p, rules)
+            if stmt.is_error()
+                return stmt
+            end
+            prog.add_child(stmt)
+        end
+        skip_newlines(p)
+    end
+
+    return prog
+end
+
+# ─── AST node kind name (for debugging) ──────────────────────────────
+
+def nk_name(k: i64) -> str
+    if k == pars.NodeKind.ERROR
+        return "ERROR"
+    end
+    if k == NodeKind.INT_LIT
+        return "INT_LIT"
+    end
+    if k == NodeKind.FLOAT_LIT
+        return "FLOAT_LIT"
+    end
+    if k == NodeKind.STRING_LIT
+        return "STRING_LIT"
+    end
+    if k == NodeKind.CHAR_LIT
+        return "CHAR_LIT"
+    end
+    if k == NodeKind.BOOL_LIT
+        return "BOOL_LIT"
+    end
+    if k == NodeKind.NONE_LIT
+        return "NONE_LIT"
+    end
+    if k == NodeKind.IDENT
+        return "IDENT"
+    end
+    if k == NodeKind.BINARY
+        return "BINARY"
+    end
+    if k == NodeKind.UNARY
+        return "UNARY"
+    end
+    if k == NodeKind.CALL
+        return "CALL"
+    end
+    if k == NodeKind.INDEX
+        return "INDEX"
+    end
+    if k == NodeKind.MEMBER
+        return "MEMBER"
+    end
+    if k == NodeKind.IS
+        return "IS"
+    end
+    if k == NodeKind.AS
+        return "AS"
+    end
+    if k == NodeKind.TUPLE_EXPR
+        return "TUPLE_EXPR"
+    end
+    if k == NodeKind.TYPE
+        return "TYPE"
+    end
+    if k == NodeKind.TYPE_LIST
+        return "TYPE_LIST"
+    end
+    if k == NodeKind.TYPE_DICT
+        return "TYPE_DICT"
+    end
+    if k == NodeKind.TYPE_TUPLE
+        return "TYPE_TUPLE"
+    end
+    if k == NodeKind.TYPE_FN
+        return "TYPE_FN"
+    end
+    if k == NodeKind.VAR_DECL
+        return "VAR_DECL"
+    end
+    if k == NodeKind.ASSIGN
+        return "ASSIGN"
+    end
+    if k == NodeKind.MEMBER_ASSIGN
+        return "MEMBER_ASSIGN"
+    end
+    if k == NodeKind.INDEX_ASSIGN
+        return "INDEX_ASSIGN"
+    end
+    if k == NodeKind.EXPR_STMT
+        return "EXPR_STMT"
+    end
+    if k == NodeKind.RETURN
+        return "RETURN"
+    end
+    if k == NodeKind.BREAK
+        return "BREAK"
+    end
+    if k == NodeKind.CONTINUE
+        return "CONTINUE"
+    end
+    if k == NodeKind.BLOCK
+        return "BLOCK"
+    end
+    if k == NodeKind.TUPLE_DESTRUCT
+        return "TUPLE_DESTRUCT"
+    end
+    if k == NodeKind.IF
+        return "IF"
+    end
+    if k == NodeKind.IF_ARM
+        return "IF_ARM"
+    end
+    if k == NodeKind.WHILE
+        return "WHILE"
+    end
+    if k == NodeKind.FOR
+        return "FOR"
+    end
+    if k == NodeKind.FUNC_DECL
+        return "FUNC_DECL"
+    end
+    if k == NodeKind.PARAM
+        return "PARAM"
+    end
+    if k == NodeKind.CLASS_DECL
+        return "CLASS_DECL"
+    end
+    if k == NodeKind.STRUCT_DECL
+        return "STRUCT_DECL"
+    end
+    if k == NodeKind.INTERFACE_DECL
+        return "INTERFACE_DECL"
+    end
+    if k == NodeKind.METHOD_SIG
+        return "METHOD_SIG"
+    end
+    if k == NodeKind.FIELD_DECL
+        return "FIELD_DECL"
+    end
+    if k == NodeKind.ENUM_DECL
+        return "ENUM_DECL"
+    end
+    if k == NodeKind.ENUM_VARIANT
+        return "ENUM_VARIANT"
+    end
+    if k == NodeKind.IMPORT
+        return "IMPORT"
+    end
+    if k == NodeKind.EXTERN
+        return "EXTERN"
+    end
+    if k == NodeKind.PROGRAM
+        return "PROGRAM"
+    end
+    if k == NodeKind.CONST_DECL
+        return "CONST_DECL"
+    end
+    if k == NodeKind.STATIC_DECL
+        return "STATIC_DECL"
+    end
+    if k == NodeKind.TYPE_PARAM
+        return "TYPE_PARAM"
+    end
+    if k == NodeKind.LIST_LIT
+        return "LIST_LIT"
+    end
+    if k == NodeKind.DICT_LIT
+        return "DICT_LIT"
+    end
+    return "???"
+end
+
+# ─── Pretty-print AST ────────────────────────────────────────────────
+
+def dump_ast(n: pars.Node, indent: i64)
+    sb := stringbuilder.new()
+    i: i64 = 0
+    while i < indent
+        stringbuilder.append_str(sb, "  ")
+        i += 1
+    end
+    stringbuilder.append_str(sb, nk_name(n.kind))
+    if len(n.value) > 0
+        stringbuilder.append_str(sb, "(")
+        stringbuilder.append_str(sb, n.value)
+        stringbuilder.append_str(sb, ")")
+    end
+    print(stringbuilder.build(sb))
+    j: i64 = 0
+    while j < n.child_count()
+        dump_ast(n.child(j), indent + 1)
+        j += 1
+    end
+end

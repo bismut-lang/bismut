@@ -1,0 +1,15 @@
+# Driver: parse a .mut file with parser and dump the AST
+# Usage: ./ast_dump_mut <filename>
+extern os
+extern filesystem
+extern string
+import langtools.sink
+import preprocessor as pp
+import parser as mp
+
+file := os.argv(1)
+source := filesystem.read(file)
+source = pp.preprocess(source, file)
+s := sink.Sink()
+ast := mp.parse(file, source, s)
+mp.dump_ast(ast, 0)

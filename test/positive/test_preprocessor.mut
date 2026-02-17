@@ -1,0 +1,135 @@
+# Test the Bismut preprocessor module
+
+import preprocessor as pp
+
+# ─── Test 1: No directives (passthrough) ─────────────────────────────
+
+src1 := "hello\nworld"
+r1 := pp.preprocess(src1, "test1")
+if r1 == "hello\nworld"
+    print("PASS 1: passthrough")
+else
+    print("FAIL 1: passthrough")
+    print(r1)
+end
+
+# ─── Test 2: @define + @if (taken) ────────────────────────────────────
+
+src2 := "@define FOO\n@if FOO\nyes\n@end"
+r2 := pp.preprocess(src2, "test2")
+if r2 == "yes"
+    print("PASS 2: define+if taken")
+else
+    print("FAIL 2: define+if taken")
+    print(r2)
+end
+
+# ─── Test 3: @if not taken ────────────────────────────────────────────
+
+src3 := "@if NOPE\nhidden\n@end\nvisible"
+r3 := pp.preprocess(src3, "test3")
+if r3 == "visible"
+    print("PASS 3: if not taken")
+else
+    print("FAIL 3: if not taken")
+    print(r3)
+end
+
+# ─── Test 4: @if/@elif/@else ──────────────────────────────────────────
+
+src4 := "@define B\n@if A\naa\n@elif B\nbb\n@else\ncc\n@end"
+r4 := pp.preprocess(src4, "test4")
+if r4 == "bb"
+    print("PASS 4: elif taken")
+else
+    print("FAIL 4: elif taken")
+    print(r4)
+end
+
+# ─── Test 5: @else branch taken ──────────────────────────────────────
+
+src5 := "@if NOPE1\na\n@elif NOPE2\nb\n@else\nc\n@end"
+r5 := pp.preprocess(src5, "test5")
+if r5 == "c"
+    print("PASS 5: else taken")
+else
+    print("FAIL 5: else taken")
+    print(r5)
+end
+
+# ─── Test 6: Nested @if ──────────────────────────────────────────────
+
+src6 := "@define X\n@define Y\n@if X\n@if Y\nboth\n@end\n@end"
+r6 := pp.preprocess(src6, "test6")
+if r6 == "both"
+    print("PASS 6: nested if")
+else
+    print("FAIL 6: nested if")
+    print(r6)
+end
+
+# ─── Test 7: Nested @if, inner false ─────────────────────────────────
+
+src7 := "@define X\n@if X\nouter\n@if Z\ninner\n@end\n@end"
+r7 := pp.preprocess(src7, "test7")
+if r7 == "outer"
+    print("PASS 7: nested, inner false")
+else
+    print("FAIL 7: nested, inner false")
+    print(r7)
+end
+
+# ─── Test 8: @define in dead branch is ignored ────────────────────────
+
+src8 := "@if NOPE\n@define SECRET\n@end\n@if SECRET\nhidden\n@end\nvisible"
+r8 := pp.preprocess(src8, "test8")
+if r8 == "visible"
+    print("PASS 8: define in dead branch")
+else
+    print("FAIL 8: define in dead branch")
+    print(r8)
+end
+
+# ─── Test 9: Platform define exists ───────────────────────────────────
+
+src9 := "@if __LINUX__\nlinux\n@elif __MACOS__\nmacos\n@elif __WIN__\nwin\n@end"
+r9 := pp.preprocess(src9, "test9")
+# At least one platform branch should be taken
+if len(r9) > 0
+    print("PASS 9: platform define")
+else
+    print("FAIL 9: platform define")
+end
+
+# ─── Test 10: Multiple lines preserved ────────────────────────────────
+
+src10 := "a\n@define D\n@if D\nb\nc\n@end\nd"
+r10 := pp.preprocess(src10, "test10")
+if r10 == "a\nb\nc\nd"
+    print("PASS 10: multi-line block")
+else
+    print("FAIL 10: multi-line block")
+    print(r10)
+end
+
+# ─── Test 11: Already-taken elif skips later branches ─────────────────
+
+src11 := "@define A\n@if A\nfirst\n@elif A\nsecond\n@else\nthird\n@end"
+r11 := pp.preprocess(src11, "test11")
+if r11 == "first"
+    print("PASS 11: first branch wins")
+else
+    print("FAIL 11: first branch wins")
+    print(r11)
+end
+
+# ─── Test 12: Empty input ────────────────────────────────────────────
+
+src12 := ""
+r12 := pp.preprocess(src12, "test12")
+if r12 == ""
+    print("PASS 12: empty input")
+else
+    print("FAIL 12: empty input")
+    print(r12)
+end

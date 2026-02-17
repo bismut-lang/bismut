@@ -1,0 +1,84 @@
+# emit.mut — Indentation-aware code emitter
+#
+# StringBuilder wrapper with indent/dedent tracking.
+# For generating C, JS, LLVM IR, or any structured text output.
+#
+# Usage:
+#   import langtools.emit
+#   e := emit.Emitter()
+#   e.writeln("#include <stdio.h>")
+#   e.writeln("int main() {")
+#   e.indent()
+#   e.writeln("printf(\"hello\\n\");")
+#   e.writeln("return 0;")
+#   e.dedent()
+#   e.writeln("}")
+#   print(e.build())
+
+extern stringbuilder
+
+class Emitter
+    sb: stringbuilder.StringBuilder
+    lvl: i64
+    indent_str: str
+
+    def init(self)
+        self.sb = stringbuilder.new()
+        self.lvl = 0
+        self.indent_str = "    "
+    end
+
+    def set_indent(self, s: str)
+        self.indent_str = s
+    end
+
+    def indent(self)
+        self.lvl += 1
+    end
+
+    def dedent(self)
+        if self.lvl > 0
+            self.lvl -= 1
+        end
+    end
+
+    def writeln(self, line: str)
+        self._write_indent()
+        stringbuilder.append_str(self.sb, line)
+        stringbuilder.append_str(self.sb, "\n")
+    end
+
+    def write(self, text: str)
+        stringbuilder.append_str(self.sb, text)
+    end
+
+    def write_indented(self, text: str)
+        self._write_indent()
+        stringbuilder.append_str(self.sb, text)
+    end
+
+    def newline(self)
+        stringbuilder.append_str(self.sb, "\n")
+    end
+
+    def build(self) -> str
+        return stringbuilder.build(self.sb)
+    end
+
+    def clear(self)
+        stringbuilder.clear(self.sb)
+        self.lvl = 0
+    end
+
+    def level(self) -> i64
+        return self.lvl
+    end
+
+    def _write_indent(self)
+        i: i64 = 0
+        while i < self.lvl
+            stringbuilder.append_str(self.sb, self.indent_str)
+            i += 1
+        end
+    end
+end

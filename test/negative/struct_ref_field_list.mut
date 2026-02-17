@@ -1,0 +1,5 @@
+# ERROR: struct fields cannot be reference types (List is a ref type)
+struct Container
+    items: List[i64]
+    count: i64
+end

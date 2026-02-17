@@ -1,0 +1,134 @@
+# test_import_name_clash.mut — Tests for scope-aware import name resolution
+#
+# Regression test for the bug where a local variable/parameter with
+# the same name as an import alias would be incorrectly mangled.
+# e.g. `import lib.shapes as s` + a local variable `s` would cause
+# the resolver to rewrite `s.x` (local field access) as `s__x`.
+
+import lib.shapes
+
+# ─── Test 1: parameter name shadows import alias ─────────────────────
+
+print("--- test 1: param shadows alias ---")
+
+def use_shapes_param(shapes: i64) -> i64
+    # 'shapes' here is a parameter, NOT the module alias.
+    # The resolver must not mangle 'shapes' in this scope.
+    return shapes + 1
+end
+
+result1 := use_shapes_param(41)
+if result1 != 42
+    print(format("FAIL: expected 42, got {}", result1))
+else
+    print("PASS")
+end
+
+# ─── Test 2: local variable shadows import alias ─────────────────────
+
+print("--- test 2: local var shadows alias ---")
+
+def use_shapes_local() -> i64
+    shapes: i64 = 10
+    # This must NOT be mangled to shapes__something
+    return shapes * 2
+end
+
+result2 := use_shapes_local()
+if result2 != 20
+    print(format("FAIL: expected 20, got {}", result2))
+else
+    print("PASS")
+end
+
+# ─── Test 3: module alias still works in other functions ──────────────
+
+print("--- test 3: alias works in other scopes ---")
+
+def use_real_shapes() -> str
+    # Here 'shapes' refers to the module, not any local variable
+    c := shapes.Circle(3.0)
+    return c.name()
+end
+
+result3 := use_real_shapes()
+if result3 != "Circle"
+    print(format("FAIL: expected 'Circle', got '{}'", result3))
+else
+    print("PASS")
+end
+
+# ─── Test 4: same function uses both module and local ────────────────
+
+print("--- test 4: module + local in different scopes ---")
+
+def mixed_usage() -> i64
+    # Use the import alias for the module
+    c := shapes.Circle(2.0)
+    name := c.name()
+    if name != "Circle"
+        return -1
+    end
+    return 1
+end
+
+result4 := mixed_usage()
+if result4 != 1
+    print(format("FAIL: expected 1, got {}", result4))
+else
+    print("PASS")
+end
+
+# ─── Test 5: for-loop variable shadows import alias ──────────────────
+
+print("--- test 5: for-loop var shadows alias ---")
+
+def loop_shadow() -> i64
+    total: i64 = 0
+    for shapes:i64 in range(5)
+        # 'shapes' here is the loop variable, not the module
+        total += shapes
+    end
+    return total
+end
+
+result5 := loop_shadow()
+if result5 != 10
+    print(format("FAIL: expected 10, got {}", result5))
+else
+    print("PASS")
+end
+
+# ─── Test 6: walrus decl shadows alias ───────────────────────────────
+
+print("--- test 6: walrus decl shadows alias ---")
+
+def walrus_shadow() -> i64
+    shapes := 99
+    return shapes
+end
+
+result6 := walrus_shadow()
+if result6 != 99
+    print(format("FAIL: expected 99, got {}", result6))
+else
+    print("PASS")
+end
+
+# ─── Test 7: interface from import still works ───────────────────────
+
+print("--- test 7: interface from import ---")
+
+def use_interface() -> f64
+    s: shapes.IShape = shapes.Rect(3.0, 4.0)
+    return s.area()
+end
+
+result7 := use_interface()
+if result7 != 12.0
+    print(format("FAIL: expected 12.0, got {}", result7))
+else
+    print("PASS")
+end
+
+print("--- done ---")

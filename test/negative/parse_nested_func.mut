@@ -1,0 +1,7 @@
+# Negative: function defined inside function (not allowed)
+def outer() -> i64
+    def inner() -> i64
+        return 1
+    end
+    return inner()
+end

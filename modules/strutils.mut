@@ -1,0 +1,240 @@
+# strutils.mut — String and character utilities for Bismut
+#
+# Character classification:
+#   is_alpha, is_upper, is_lower, is_digit, is_hex_digit, is_alnum,
+#   is_whitespace, is_newline, is_printable, is_ident_start, is_ident_part
+#
+# Character conversion:
+#   to_upper, to_lower
+#
+# String predicates:
+#   starts_with, ends_with, contains
+#
+# String operations:
+#   trim, trim_left, trim_right, repeat, replace, split, join
+
+extern string
+extern stringbuilder
+
+# ─── Character classification ─────────────────────────────────────────
+
+def is_alpha(c: i64) -> bool
+    if c >= 'A' and c <= 'Z'
+        return True
+    end
+    if c >= 'a' and c <= 'z'
+        return True
+    end
+    return False
+end
+
+def is_upper(c: i64) -> bool
+    return c >= 'A' and c <= 'Z'
+end
+
+def is_lower(c: i64) -> bool
+    return c >= 'a' and c <= 'z'
+end
+
+def is_digit(c: i64) -> bool
+    return c >= '0' and c <= '9'
+end
+
+def is_hex_digit(c: i64) -> bool
+    if c >= '0' and c <= '9'
+        return True
+    end
+    if c >= 'A' and c <= 'F'
+        return True
+    end
+    if c >= 'a' and c <= 'f'
+        return True
+    end
+    return False
+end
+
+def is_alnum(c: i64) -> bool
+    return is_alpha(c) or is_digit(c)
+end
+
+def is_whitespace(c: i64) -> bool
+    return c == ' ' or c == '\t' or c == '\r'
+end
+
+def is_newline(c: i64) -> bool
+    return c == '\n'
+end
+
+def is_printable(c: i64) -> bool
+    return c >= 32 and c <= 126
+end
+
+def is_ident_start(c: i64) -> bool
+    return is_alpha(c) or c == '_'
+end
+
+def is_ident_part(c: i64) -> bool
+    return is_alnum(c) or c == '_'
+end
+
+# ─── Character conversion ─────────────────────────────────────────────
+
+def to_upper(c: i64) -> i64
+    if c >= 'a' and c <= 'z'
+        return c - 32
+    end
+    return c
+end
+
+def to_lower(c: i64) -> i64
+    if c >= 'A' and c <= 'Z'
+        return c + 32
+    end
+    return c
+end
+
+# ─── String predicates ────────────────────────────────────────────────
+
+def starts_with(s: str, prefix: str) -> bool
+    plen := len(prefix)
+    if len(s) < plen
+        return False
+    end
+    i: i64 = 0
+    while i < plen
+        if s[i] != prefix[i]
+            return False
+        end
+        i += 1
+    end
+    return True
+end
+
+def ends_with(s: str, suffix: str) -> bool
+    slen := len(s)
+    xlen := len(suffix)
+    if slen < xlen
+        return False
+    end
+    offset := slen - xlen
+    i: i64 = 0
+    while i < xlen
+        if s[offset + i] != suffix[i]
+            return False
+        end
+        i += 1
+    end
+    return True
+end
+
+def contains(s: str, sub: str) -> bool
+    return string.find(s, sub) >= 0
+end
+
+# ─── String operations ────────────────────────────────────────────────
+
+def trim_left(s: str) -> str
+    slen := len(s)
+    i: i64 = 0
+    while i < slen and (s[i] == ' ' or s[i] == '\t' or s[i] == '\r' or s[i] == '\n')
+        i += 1
+    end
+    if i == 0
+        return s
+    end
+    return string.substr(s, i, slen - i)
+end
+
+def trim_right(s: str) -> str
+    slen := len(s)
+    i := slen
+    while i > 0 and (s[i - 1] == ' ' or s[i - 1] == '\t' or s[i - 1] == '\r' or s[i - 1] == '\n')
+        i -= 1
+    end
+    if i == slen
+        return s
+    end
+    return string.substr(s, 0, i)
+end
+
+def trim(s: str) -> str
+    return trim_right(trim_left(s))
+end
+
+def repeat(s: str, n: i64) -> str
+    if n <= 0
+        return ""
+    end
+    if n == 1
+        return s
+    end
+    sb := stringbuilder.new()
+    i: i64 = 0
+    while i < n
+        stringbuilder.append_str(sb, s)
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end
+
+def replace(s: str, old: str, new: str) -> str
+    old_len := len(old)
+    if old_len == 0
+        return s
+    end
+    sb := stringbuilder.new()
+    slen := len(s)
+    i: i64 = 0
+    while i < slen
+        pos := string.find(string.substr(s, i, slen - i), old)
+        if pos < 0
+            stringbuilder.append_str(sb, string.substr(s, i, slen - i))
+            return stringbuilder.build(sb)
+        end
+        if pos > 0
+            stringbuilder.append_str(sb, string.substr(s, i, pos))
+        end
+        stringbuilder.append_str(sb, new)
+        i += pos + old_len
+    end
+    return stringbuilder.build(sb)
+end
+
+def split(s: str, delim: str) -> List[str]
+    result: List[str] = List[str]()
+    dlen := len(delim)
+    if dlen == 0
+        append(result, s)
+        return result
+    end
+    slen := len(s)
+    i: i64 = 0
+    while i <= slen
+        rest := string.substr(s, i, slen - i)
+        pos := string.find(rest, delim)
+        if pos < 0
+            append(result, rest)
+            return result
+        end
+        append(result, string.substr(s, i, pos))
+        i += pos + dlen
+    end
+    return result
+end
+
+def join(parts: List[str], sep: str) -> str
+    n := len(parts)
+    if n == 0
+        return ""
+    end
+    sb := stringbuilder.new()
+    i: i64 = 0
+    while i < n
+        if i > 0
+            stringbuilder.append_str(sb, sep)
+        end
+        stringbuilder.append_str(sb, parts[i])
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end

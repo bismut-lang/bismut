@@ -1,0 +1,4 @@
+# format() with unsupported argument type — should fail
+nums: List[i64] = List[i64]()
+s := format("list: {}", nums)
+print(s)

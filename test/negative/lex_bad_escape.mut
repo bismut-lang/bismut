@@ -1,0 +1,2 @@
+# Negative: unknown escape sequence in string
+x: str = "hello\q"

@@ -1,0 +1,141 @@
+# source.mut — Multi-file source manager with fast line/column lookup
+#
+# Registers source files and builds line-offset tables for O(1)
+# line:col resolution from byte offsets. Useful for error reporting
+# across multiple imported files.
+#
+# Usage:
+#   import langtools.source
+#
+#   sm := source.SourceManager()
+#   fid := sm.add_file("main.mut", source_text)
+#   fid2 := sm.add_file("lib.mut", lib_text)
+#
+#   # Resolve byte offset to line:col
+#   loc := sm.locate(fid, 42)
+#   print(loc.line)             # 1-based line number
+#   print(loc.col)              # 1-based column
+#
+#   # Get source line text
+#   print(sm.get_line(fid, loc.line))
+#
+#   # File info
+#   print(sm.file_name(fid))
+#   print(sm.file_count())
+
+extern string
+
+# ─── Location result ─────────────────────────────────────────────────
+
+struct Loc
+    file_id: i64
+    line: i64
+    col: i64
+end
+
+# ─── Per-file data ───────────────────────────────────────────────────
+
+class SourceFile
+    name: str
+    content: str
+    line_offsets: List[i64]
+
+    def init(self, name: str, content: str)
+        self.name = name
+        self.content = content
+        self.line_offsets = _build_offsets(content)
+    end
+
+    def line_count(self) -> i64
+        return len(self.line_offsets)
+    end
+end
+
+# ─── Build line-start offset table ───────────────────────────────────
+# Returns a list where offsets[i] is the byte offset of line i+1.
+# Line 1 always starts at offset 0.
+
+def _build_offsets(src: str) -> List[i64]
+    offsets := List[i64]()
+    append(offsets, 0)
+    i: i64 = 0
+    slen := len(src)
+    while i < slen
+        if src[i] == '\n'
+            append(offsets, i + 1)
+        end
+        i += 1
+    end
+    return offsets
+end
+
+# ─── Binary search: find line number for a byte offset ───────────────
+# Returns 1-based line number.
+
+def _find_line(offsets: List[i64], offset: i64) -> i64
+    lo: i64 = 0
+    hi := len(offsets) - 1
+    while lo <= hi
+        mid := lo + (hi - lo) / 2
+        if offsets[mid] <= offset
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    return lo
+end
+
+# ─── Source manager ──────────────────────────────────────────────────
+
+class SourceManager
+    files: List[SourceFile]
+
+    def init(self)
+        self.files = List[SourceFile]()
+    end
+
+    def add_file(self, name: str, content: str) -> i64
+        fid := len(self.files)
+        append(self.files, SourceFile(name, content))
+        return fid
+    end
+
+    def locate(self, file_id: i64, offset: i64) -> Loc
+        sf := self.files[file_id]
+        line := _find_line(sf.line_offsets, offset)
+        col := offset - sf.line_offsets[line - 1] + 1
+        return Loc(file_id, line, col)
+    end
+
+    def get_line(self, file_id: i64, line_num: i64) -> str
+        sf := self.files[file_id]
+        if line_num < 1 or line_num > sf.line_count()
+            return ""
+        end
+        start := sf.line_offsets[line_num - 1]
+        slen := len(sf.content)
+        # Find end of line
+        e := start
+        while e < slen and sf.content[e] != '\n'
+            e += 1
+        end
+        return string.substr(sf.content, start, e - start)
+    end
+
+    def file_name(self, file_id: i64) -> str
+        return self.files[file_id].name
+    end
+
+    def file_count(self) -> i64
+        return len(self.files)
+    end
+
+    def file_size(self, file_id: i64) -> i64
+        return len(self.files[file_id].content)
+    end
+
+    def line_count(self, file_id: i64) -> i64
+        return self.files[file_id].line_count()
+    end
+end

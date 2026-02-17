@@ -1,0 +1,11 @@
+# Runtime panic: null pointer dereference on field write
+
+class Node
+    val: i64
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+n: Node = None
+n.val = 42

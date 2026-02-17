@@ -1,0 +1,28 @@
+# Test: Go-style module import system
+# Tests import, aliasing, dotted access for classes/interfaces/functions
+
+import lib.shapes
+import lib.helpers as h
+
+# --- Test 1: imported function via aliased module ---
+print(h.add(3, 4))
+
+# --- Test 2: aliased module function ---
+print(h.greet("World"))
+
+# --- Test 3: imported class ---
+c := shapes.Circle(5.0)
+print(c.name())
+print(c.area())
+
+# --- Test 4: imported interface ---
+s: shapes.IShape = shapes.Rect(3.0, 4.0)
+print(s.name())
+print(s.area())
+
+# --- Test 5: imported function taking interface ---
+print(shapes.describe(shapes.Circle(1.0)))
+
+# --- Test 6: imported class ---
+r := shapes.Rect(6.0, 7.0)
+print(r.area())

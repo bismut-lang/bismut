@@ -1,0 +1,12 @@
+# ERROR: structs cannot implement interfaces
+interface IShape
+    def area(self) -> f64
+end
+
+struct Circle : IShape
+    r: f64
+
+    def area(self) -> f64
+        return self.r * self.r * 3.14
+    end
+end

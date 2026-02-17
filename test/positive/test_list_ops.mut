@@ -1,0 +1,96 @@
+# Test pop() and remove() on List
+
+# ── pop: removes and returns last element ──
+nums := List[i64]() {10, 20, 30}
+x := pop(nums)
+print(x)           # 30
+print(len(nums))   # 2
+print(nums[0])     # 10
+print(nums[1])     # 20
+
+y := pop(nums)
+print(y)           # 20
+print(len(nums))   # 1
+
+z := pop(nums)
+print(z)           # 10
+print(len(nums))   # 0
+
+# ── pop with ref types (strings) ──
+names := List[str]() {"alice", "bob", "charlie"}
+last := pop(names)
+print(last)         # charlie
+print(len(names))   # 2
+print(names[0])     # alice
+print(names[1])     # bob
+
+# ── remove: removes element at index, shifts remaining ──
+vals := List[i64]() {100, 200, 300, 400, 500}
+remove(vals, 2)     # remove 300
+print(len(vals))    # 4
+print(vals[0])      # 100
+print(vals[1])      # 200
+print(vals[2])      # 400
+print(vals[3])      # 500
+
+# Remove first element
+remove(vals, 0)
+print(len(vals))    # 3
+print(vals[0])      # 200
+
+# Remove last element
+remove(vals, 2)
+print(len(vals))    # 2
+print(vals[0])      # 200
+print(vals[1])      # 400
+
+# ── remove with ref types ──
+items := List[str]() {"a", "b", "c", "d"}
+remove(items, 1)    # remove "b"
+print(len(items))   # 3
+print(items[0])     # a
+print(items[1])     # c
+print(items[2])     # d
+
+# ── pop after append ──
+stack := List[i64]()
+append(stack, 1)
+append(stack, 2)
+append(stack, 3)
+v1 := pop(stack)
+print(v1)           # 3
+append(stack, 4)
+v2 := pop(stack)
+print(v2)           # 4
+print(len(stack))   # 2
+
+# Expected output:
+# 30
+# 2
+# 10
+# 20
+# 20
+# 1
+# 10
+# 0
+# charlie
+# 2
+# alice
+# bob
+# 4
+# 100
+# 200
+# 400
+# 500
+# 3
+# 200
+# 2
+# 200
+# 400
+# 3
+# a
+# c
+# d
+# 3
+# 4
+# 2

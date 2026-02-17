@@ -1,0 +1,18 @@
+# Negative: interface method signature mismatch
+
+interface IA
+    def foo(self) -> str
+end
+
+interface IB
+    def foo(self) -> i64
+end
+
+class X : IA, IB
+    def init(self)
+    end
+
+    def foo(self) -> str
+        return "hello"
+    end
+end

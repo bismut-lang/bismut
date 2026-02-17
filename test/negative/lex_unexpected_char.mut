@@ -1,0 +1,2 @@
+# Negative: unexpected character
+x: i64 = 5 @ 3

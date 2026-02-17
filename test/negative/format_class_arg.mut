@@ -1,0 +1,13 @@
+# format() with class argument — should fail
+class Point
+    x: i64
+    y: i64
+    def init(self, x: i64, y: i64)
+        self.x = x
+        self.y = y
+    end
+end
+
+p := Point(1, 2)
+s := format("point: {}", p)
+print(s)

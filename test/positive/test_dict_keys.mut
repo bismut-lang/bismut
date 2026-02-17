@@ -1,0 +1,89 @@
+# Test Dict with various key types
+
+extern string
+
+# --- i64 keys ---
+d1 := Dict[i64, str]()
+d1[10] = "ten"
+d1[20] = "twenty"
+d1[30] = "thirty"
+print(d1[10])
+print(d1[20])
+print(d1[30])
+print(len(d1))
+print(has(d1, 10))
+print(has(d1, 99))
+
+# Overwrite
+d1[10] = "TEN"
+print(d1[10])
+
+# keys()
+k1 := keys(d1)
+print(len(k1))
+
+# --- i32 keys ---
+d2 := Dict[i32, i64]()
+x: i32 = 5
+y: i32 = 15
+d2[x] = 100
+d2[y] = 200
+print(d2[x])
+print(d2[y])
+
+# --- bool keys ---
+d3 := Dict[bool, str]()
+d3[True] = "yes"
+d3[False] = "no"
+print(d3[True])
+print(d3[False])
+print(len(d3))
+
+# --- enum keys (enums are i64, use i64 keys) ---
+enum Color
+    RED, GREEN, BLUE
+end
+
+d4 := Dict[i64, str]()
+r: i64 = Color.RED
+g: i64 = Color.GREEN
+b: i64 = Color.BLUE
+d4[r] = "red"
+d4[g] = "green"
+d4[b] = "blue"
+print(d4[r])
+print(d4[g])
+print(d4[b])
+
+# --- str keys (still works) ---
+d5 := Dict[str, i64]()
+d5["a"] = 1
+d5["b"] = 2
+d5["c"] = 3
+print(d5["a"])
+print(d5["b"])
+print(d5["c"])
+
+# --- Dict literal syntax ---
+d6 := Dict[i64, str]() {1: "one", 2: "two", 3: "three"}
+print(d6[1])
+print(d6[2])
+print(d6[3])
+
+# --- Explicit generic ops ---
+d7 := Dict[str, i64]()
+put[str, i64](d7, "x", 42)
+print(lookup[str, i64](d7, "x"))
+print(has[str, i64](d7, "x"))
+
+# --- for loop over keys ---
+d8 := Dict[str, i64]() {"only": 42}
+for k: str in keys(d8)
+    print(k)
+end
+
+# --- i64 key for loop ---
+d9 := Dict[i64, str]() {100: "hundred"}
+for k: i64 in keys(d9)
+    print(k)
+end

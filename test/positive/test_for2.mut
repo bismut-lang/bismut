@@ -1,0 +1,51 @@
+# Test new List[X] / Dict[K, V] syntax and for-in with type annotations
+
+# 1. for i:i64 in range(n) — basic range
+for i:i64 in range(5)
+    print(i)
+end
+
+# 2. for i:i64 in range(start, end)
+for i:i64 in range(3, 7)
+    print(i)
+end
+
+# 3. for i:i64 in range(start, end, step) — negative step
+for i:i64 in range(10, 0, -2)
+    print(i)
+end
+
+# 4. List[i64] variable
+nums: List[i64] = List[i64]()
+append[i64](nums, 100)
+append[i64](nums, 200)
+append[i64](nums, 300)
+for n:i64 in nums
+    print(n)
+end
+
+# 5. List[str] variable
+names: List[str] = List[str]()
+append[str](names, "alice")
+append[str](names, "bob")
+for name:str in names
+    print(name)
+end
+
+# 6. Dict[str, i64] variable + keys
+d: Dict[str, i64] = Dict[str, i64]()
+put[str, i64](d, "x", 10)
+put[str, i64](d, "y", 20)
+put[str, i64](d, "z", 30)
+count: i64 = 0
+for k:str in keys(d)
+    count += 1
+end
+print(count)
+test := "Hello, world!"
+# 7. nested for
+for i:i64 in range(3)
+    for j:i64 in range(2)
+        print(i * 10 + j)
+    end
+end

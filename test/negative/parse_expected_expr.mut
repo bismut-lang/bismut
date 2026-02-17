@@ -1,0 +1,2 @@
+# Negative: expected expression but got keyword
+x: i64 = end

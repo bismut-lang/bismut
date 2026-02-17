@@ -1,0 +1,126 @@
+# Test: Bismut codegen (self-hosted)
+# Parses simple Bismut programs and generates C code via codegen module.
+# Tests basic code generation: print statement, variable decl, functions, arithmetic.
+
+extern string
+extern stringbuilder
+extern filesystem
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+import typecheck as tc
+import import_resolver as ir
+import codegen as gen_mod
+
+# ─── helper: parse + generate ────────────────────────────────────────
+
+def gen(src: str, name: str) -> str
+    s := sink.Sink()
+    prog := mp.parse(name, src, s)
+    if s.has_errors()
+        print(format("PARSE ERROR in {}", name))
+        i: i64 = 0
+        while i < s.count()
+            print(s.get(i).msg)
+            i += 1
+        end
+        return ""
+    end
+    tc.check(prog, s)
+    if s.has_errors()
+        print(format("TYPE ERROR in {}", name))
+        i: i64 = 0
+        while i < s.count()
+            print(s.get(i).msg)
+            i += 1
+        end
+        return ""
+    end
+    ext := ir.ExternInfo()
+    return gen_mod.generate_c(prog, name, ext, False)
+end
+
+# ─── Test 1: hello world ─────────────────────────────────────────────
+print("--- test 1: hello world ---")
+c1 := gen("print(42)", "<t1>")
+# Should contain a call to the print function for i64
+if string.find(c1, "__lang_rt_print_i64(42)") >= 0
+    print("OK")
+else
+    print("FAIL: expected __lang_rt_print_i64(42)")
+    print(c1)
+end
+
+# ─── Test 2: variable declaration ─────────────────────────────────────
+print("--- test 2: variable declaration ---")
+c2 := gen("x: i64 = 10\nprint(x)", "<t2>")
+if string.find(c2, "int64_t") >= 0 and string.find(c2, "= 10") >= 0
+    print("OK")
+else
+    print("FAIL: expected int64_t ... = 10")
+    print(c2)
+end
+
+# ─── Test 3: function definition ──────────────────────────────────────
+print("--- test 3: function definition ---")
+c3 := gen("def add(a: i64, b: i64) -> i64\n    return a + b\nend\nprint(add(3, 4))", "<t3>")
+if string.find(c3, "int64_t __lang_rt_fn_add(") >= 0 and string.find(c3, "return") >= 0
+    print("OK")
+else
+    print("FAIL: expected function definition")
+    print(c3)
+end
+
+# ─── Test 4: string literal ──────────────────────────────────────────
+print("--- test 4: string literal ---")
+c4 := gen("s: str = \"hello\"\nprint(s)", "<t4>")
+if string.find(c4, "__lang_rt_Str") >= 0
+    print("OK")
+else
+    print("FAIL: expected __lang_rt_Str")
+    print(c4)
+end
+
+# ─── Test 5: if/else ─────────────────────────────────────────────────
+print("--- test 5: if/else ---")
+c5 := gen("x: i64 = 5\nif x > 3\n    print(1)\nelse\n    print(0)\nend", "<t5>")
+if string.find(c5, "if (") >= 0 and string.find(c5, "else") >= 0
+    print("OK")
+else
+    print("FAIL: expected if/else")
+    print(c5)
+end
+
+# ─── Test 6: while loop ──────────────────────────────────────────────
+print("--- test 6: while loop ---")
+c6 := gen("i: i64 = 0\nwhile i < 10\n    i += 1\nend", "<t6>")
+if string.find(c6, "while (") >= 0
+    print("OK")
+else
+    print("FAIL: expected while loop")
+    print(c6)
+end
+
+# ─── Test 7: bool literal ────────────────────────────────────────────
+print("--- test 7: bool literal ---")
+c7 := gen("x: bool = True\nprint(x)", "<t7>")
+if string.find(c7, "true") >= 0
+    print("OK")
+else
+    print("FAIL: expected true")
+    print(c7)
+end
+
+# ─── Test 8: main function wrapper ───────────────────────────────────
+print("--- test 8: main function ---")
+# Every generated file should have an int main()
+c8 := gen("print(1)", "<t8>")
+if string.find(c8, "int main(") >= 0
+    print("OK")
+else
+    print("FAIL: expected int main(")
+    print(c8)
+end
+
+print("--- done ---")

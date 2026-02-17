@@ -1,0 +1,91 @@
+# test_subscript.mut — test [] subscript syntax for List, Dict, str
+
+# ============================================================
+# 1. List subscript read
+# ============================================================
+
+nums: List[i64] = List[i64]()
+append(nums, 10)
+append(nums, 20)
+append(nums, 30)
+
+print(nums[0])       # 10
+print(nums[1])       # 20
+print(nums[2])       # 30
+
+# ============================================================
+# 2. List subscript write
+# ============================================================
+
+nums[0] = 99
+print(nums[0])       # 99
+
+# ============================================================
+# 3. Dict subscript read
+# ============================================================
+
+d: Dict[str, i64] = Dict[str, i64]()
+put(d, "x", 10)
+put(d, "y", 20)
+
+print(d["x"])        # 10
+print(d["y"])        # 20
+
+# ============================================================
+# 4. Dict subscript write
+# ============================================================
+
+d["x"] = 99
+d["z"] = 30
+print(d["x"])        # 99
+print(d["z"])        # 30
+
+# ============================================================
+# 5. String subscript (char code)
+# ============================================================
+
+s: str = "hello"
+print(s[0])          # 104  (ASCII 'h')
+print(s[1])          # 101  (ASCII 'e')
+
+# ============================================================
+# 6. List of strings with subscript
+# ============================================================
+
+names: List[str] = List[str]()
+append(names, "alice")
+append(names, "bob")
+print(names[0])      # alice
+print(names[1])      # bob
+
+names[1] = "charlie"
+print(names[1])      # charlie
+
+# ============================================================
+# 7. Dict of strings with subscript
+# ============================================================
+
+sd: Dict[str, str] = Dict[str, str]()
+sd["greeting"] = "hello"
+sd["name"] = "world"
+print(sd["greeting"])   # hello
+print(sd["name"])       # world
+
+# ============================================================
+# 8. Mixed: subscript + function calls still work
+# ============================================================
+
+nums2 := List[i64]()
+append(nums2, 100)
+append(nums2, 200)
+print(get(nums2, 0))     # 100  (old style still works)
+print(nums2[1])           # 200  (new style)
+
+# ============================================================
+# 9. Subscript in expressions
+# ============================================================
+
+a: i64 = nums[0] + nums[1]
+print(a)              # 119  (99 + 20)
+
+print("all subscript tests passed")

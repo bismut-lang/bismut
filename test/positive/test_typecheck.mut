@@ -1,0 +1,134 @@
+# Test: Bismut type checker (typecheck module)
+# Parses source, runs the type checker, and verifies diagnostics (or lack thereof).
+# EXPECTED:--- test 1: basic types ok ---\nPASS\n--- test 2: type mismatch ---\nERROR: cannot assign value of type str to variable 'x' of type i64\n--- test 3: undefined variable ---\nERROR: undefined variable 'y'\n--- test 4: class type check ---\nPASS\n--- test 5: struct type check ---\nPASS\n--- test 6: enum usage ---\nPASS\n--- test 7: interface implementation ---\nPASS\n--- test 8: function call type checking ---\nPASS\n--- test 9: wrong arg count ---\nERROR: function 'add' expects 2 args, got 1\n--- test 10: return type mismatch ---\nERROR: return type mismatch: expected i64, got str\n--- test 11: break outside loop ---\nERROR: break not inside loop\n--- test 12: binary operator type check ---\nPASS\n--- test 13: list operations ---\nPASS\n--- test 14: dict operations ---\nPASS\n--- test 15: interface field access error ---\nERROR: cannot access fields on interface type 'IShape'\n--- test 16: const reassignment ---\nERROR: cannot assign to constant 'MAX'\n--- test 17: walrus inference ---\nPASS\n--- test 18: tuple type check ---\nPASS\n--- test 19: for loop type check ---\nPASS\n--- test 20: generic function ---\nPASS\n--- done ---
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+import typecheck as tc
+extern string
+
+def run_test(name: str, src: str, expect_error: bool, error_substr: str)
+    s := sink.Sink()
+    ast := mp.parse("<test>", src, s)
+    if s.has_errors()
+        print(format("PARSE ERROR in {}: {}", name, s.get(0).msg))
+        return
+    end
+    tc.check(ast, s)
+    if expect_error
+        if s.has_errors()
+            print(format("ERROR: {}", s.get(0).msg))
+        else
+            print(format("FAIL: expected error containing '{}' but got none", error_substr))
+        end
+    else
+        if s.has_errors()
+            print(format("FAIL: unexpected error: {}", s.get(0).msg))
+        else
+            print("PASS")
+        end
+    end
+end
+
+# ─── Test 1: basic types ok ─────────────────────────────────────────
+print("--- test 1: basic types ok ---")
+src1 := "x: i64 = 42\ny: str = \"hello\"\nz: bool = True\nw: f64 = 3.14"
+run_test("basic types", src1, False, "")
+
+# ─── Test 2: type mismatch ──────────────────────────────────────────
+print("--- test 2: type mismatch ---")
+src2 := "x: i64 = \"hello\""
+run_test("type mismatch", src2, True, "cannot assign")
+
+# ─── Test 3: undefined variable ──────────────────────────────────────
+print("--- test 3: undefined variable ---")
+src3 := "print(y)"
+run_test("undefined var", src3, True, "undefined variable")
+
+# ─── Test 4: class type check ───────────────────────────────────────
+print("--- test 4: class type check ---")
+src4 := "class Point\n    x: i64\n    y: i64\n\n    def init(self, x: i64, y: i64)\n        self.x = x\n        self.y = y\n    end\n\n    def sum(self) -> i64\n        return self.x + self.y\n    end\nend\n\np: Point = Point(1, 2)\nprint(p.sum())"
+run_test("class", src4, False, "")
+
+# ─── Test 5: struct type check ──────────────────────────────────────
+print("--- test 5: struct type check ---")
+src5 := "struct Vec2\n    x: f64\n    y: f64\nend\n\nv := Vec2(3.0, 4.0)\nprint(v.x)"
+run_test("struct", src5, False, "")
+
+# ─── Test 6: enum usage ─────────────────────────────────────────────
+print("--- test 6: enum usage ---")
+src6 := "enum Color\n    RED, GREEN, BLUE\nend\n\nc: Color = Color.RED\nn: i64 = Color.BLUE"
+run_test("enum", src6, False, "")
+
+# ─── Test 7: interface implementation ────────────────────────────────
+print("--- test 7: interface implementation ---")
+src7 := "interface IShape\n    def area(self) -> f64\nend\n\nclass Circle : IShape\n    r: f64\n\n    def init(self, r: f64)\n        self.r = r\n    end\n\n    def area(self) -> f64\n        return self.r * self.r\n    end\nend\n\ns: IShape = Circle(5.0)\nprint(s.area())"
+run_test("interface", src7, False, "")
+
+# ─── Test 8: function call type checking ─────────────────────────────
+print("--- test 8: function call type checking ---")
+src8 := "def add(a: i64, b: i64) -> i64\n    return a + b\nend\n\nresult: i64 = add(3, 4)\nprint(result)"
+run_test("func call", src8, False, "")
+
+# ─── Test 9: wrong arg count ────────────────────────────────────────
+print("--- test 9: wrong arg count ---")
+src9 := "def add(a: i64, b: i64) -> i64\n    return a + b\nend\n\nadd(1)"
+run_test("wrong arg count", src9, True, "expects 2 args, got 1")
+
+# ─── Test 10: return type mismatch ──────────────────────────────────
+print("--- test 10: return type mismatch ---")
+src10 := "def foo() -> i64\n    return \"hello\"\nend"
+run_test("return mismatch", src10, True, "return type mismatch")
+
+# ─── Test 11: break outside loop ────────────────────────────────────
+print("--- test 11: break outside loop ---")
+src11 := "break"
+run_test("break outside loop", src11, True, "break not inside loop")
+
+# ─── Test 12: binary operator type check ─────────────────────────────
+print("--- test 12: binary operator type check ---")
+src12 := "x: i64 = 10\ny: i64 = 20\nz: i64 = x + y\nb: bool = x > y\nc: bool = b and True"
+run_test("binary ops", src12, False, "")
+
+# ─── Test 13: list operations ────────────────────────────────────────
+print("--- test 13: list operations ---")
+src13 := "nums: List[i64] = List[i64]()\nappend(nums, 10)\nprint(len(nums))\nprint(nums[0])"
+run_test("list ops", src13, False, "")
+
+# ─── Test 14: dict operations ────────────────────────────────────────
+print("--- test 14: dict operations ---")
+src14 := "d: Dict[str, str] = Dict[str, str]()\nd[\"key\"] = \"val\"\nprint(d[\"key\"])\nprint(has(d, \"key\"))\nprint(len(d))"
+run_test("dict ops", src14, False, "")
+
+# ─── Test 15: interface field access error ───────────────────────────
+print("--- test 15: interface field access error ---")
+src15 := "interface IShape\n    def area(self) -> f64\nend\n\nclass Circle : IShape\n    r: f64\n\n    def init(self, r: f64)\n        self.r = r\n    end\n\n    def area(self) -> f64\n        return self.r * self.r\n    end\nend\n\ns: IShape = Circle(5.0)\nprint(s.r)"
+run_test("iface field access", src15, True, "cannot access fields on interface type")
+
+# ─── Test 16: const reassignment ─────────────────────────────────────
+print("--- test 16: const reassignment ---")
+src16 := "const MAX: i64 = 100\nMAX = 200"
+run_test("const reassign", src16, True, "cannot assign to constant")
+
+# ─── Test 17: walrus inference ───────────────────────────────────────
+print("--- test 17: walrus inference ---")
+src17 := "n := 42\nmsg := \"hello\"\npi := 3.14\nresult: i64 = n + 1"
+run_test("walrus", src17, False, "")
+
+# ─── Test 18: tuple type check ──────────────────────────────────────
+print("--- test 18: tuple type check ---")
+src18 := "def get_pair() -> (i64, str)\n    return (42, \"hello\")\nend\n\na, b := get_pair()"
+run_test("tuple", src18, False, "")
+
+# ─── Test 19: for loop type check ───────────────────────────────────
+print("--- test 19: for loop type check ---")
+src19 := "nums: List[i64] = List[i64]()\nappend(nums, 1)\nfor n:i64 in nums\n    print(n)\nend"
+run_test("for loop", src19, False, "")
+
+# ─── Test 20: generic function ───────────────────────────────────────
+print("--- test 20: generic function ---")
+src20 := "def identity[T](x: T) -> T\n    return x\nend\n\na: i64 = identity[i64](42)\nb: str = identity(\"hello\")"
+run_test("generic", src20, False, "")
+
+print("--- done ---")

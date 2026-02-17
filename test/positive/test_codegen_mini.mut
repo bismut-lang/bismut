@@ -1,0 +1,32 @@
+# Minimal codegen test: just generate C for a trivial program and print it.
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+import typecheck as tc
+import import_resolver as ir
+import codegen as gen_mod
+
+s := sink.Sink()
+src := "print(42)"
+prog := mp.parse("<test>", src, s)
+if s.has_errors()
+    print("PARSE ERROR")
+else
+    tc.check(prog, s)
+    if s.has_errors()
+        print("TYPE ERROR")
+        i: i64 = 0
+        while i < s.count()
+            print(s.get(i).msg)
+            i += 1
+        end
+    else
+        ext := ir.ExternInfo()
+        result := gen_mod.generate_c(prog, "<test>", ext, False)
+        print(result)
+    end
+end

@@ -1,0 +1,72 @@
+[types]
+Buffer = __clib__buffer_Buffer
+
+[functions]
+# Constructor
+new() -> Buffer = __clib__buffer_new
+from_str(s: str) -> Buffer = __clib__buffer_from_str
+
+# Destructor
+destroy(buf: Buffer) [dtor] = __clib__buffer_destroy
+
+# Write: single byte / raw bytes
+write_byte(buf: Buffer, val: i64) -> void = __clib__buffer_write_byte
+write_bytes(buf: Buffer, data: str) -> void = __clib__buffer_write_bytes
+write_str_zt(buf: Buffer, s: str) -> void = __clib__buffer_write_str_zt
+
+# Write: integers — little endian
+write_i16_le(buf: Buffer, val: i64) -> void = __clib__buffer_write_i16_le
+write_i32_le(buf: Buffer, val: i64) -> void = __clib__buffer_write_i32_le
+write_i64_le(buf: Buffer, val: i64) -> void = __clib__buffer_write_i64_le
+
+# Write: integers — big endian
+write_i16_be(buf: Buffer, val: i64) -> void = __clib__buffer_write_i16_be
+write_i32_be(buf: Buffer, val: i64) -> void = __clib__buffer_write_i32_be
+write_i64_be(buf: Buffer, val: i64) -> void = __clib__buffer_write_i64_be
+
+# Write: floats
+write_f32_le(buf: Buffer, val: f64) -> void = __clib__buffer_write_f32_le
+write_f32_be(buf: Buffer, val: f64) -> void = __clib__buffer_write_f32_be
+write_f64_le(buf: Buffer, val: f64) -> void = __clib__buffer_write_f64_le
+write_f64_be(buf: Buffer, val: f64) -> void = __clib__buffer_write_f64_be
+
+# Read: single byte
+read_u8(buf: Buffer) -> i64 = __clib__buffer_read_u8
+read_i8(buf: Buffer) -> i64 = __clib__buffer_read_i8
+read_bytes(buf: Buffer, n: i64) -> str = __clib__buffer_read_bytes
+read_str_zt(buf: Buffer) -> str = __clib__buffer_read_str_zt
+
+# Read: integers — little endian (unsigned)
+read_u16_le(buf: Buffer) -> i64 = __clib__buffer_read_u16_le
+read_u32_le(buf: Buffer) -> i64 = __clib__buffer_read_u32_le
+
+# Read: integers — little endian (signed)
+read_i16_le(buf: Buffer) -> i64 = __clib__buffer_read_i16_le
+read_i32_le(buf: Buffer) -> i64 = __clib__buffer_read_i32_le
+read_i64_le(buf: Buffer) -> i64 = __clib__buffer_read_i64_le
+
+# Read: integers — big endian (unsigned)
+read_u16_be(buf: Buffer) -> i64 = __clib__buffer_read_u16_be
+read_u32_be(buf: Buffer) -> i64 = __clib__buffer_read_u32_be
+
+# Read: integers — big endian (signed)
+read_i16_be(buf: Buffer) -> i64 = __clib__buffer_read_i16_be
+read_i32_be(buf: Buffer) -> i64 = __clib__buffer_read_i32_be
+read_i64_be(buf: Buffer) -> i64 = __clib__buffer_read_i64_be
+
+# Read: floats
+read_f32_le(buf: Buffer) -> f64 = __clib__buffer_read_f32_le
+read_f32_be(buf: Buffer) -> f64 = __clib__buffer_read_f32_be
+read_f64_le(buf: Buffer) -> f64 = __clib__buffer_read_f64_le
+read_f64_be(buf: Buffer) -> f64 = __clib__buffer_read_f64_be
+
+# Utility
+length(buf: Buffer) -> i64 = __clib__buffer_length
+capacity(buf: Buffer) -> i64 = __clib__buffer_capacity
+pos(buf: Buffer) -> i64 = __clib__buffer_pos
+remaining(buf: Buffer) -> i64 = __clib__buffer_remaining
+seek(buf: Buffer, pos: i64) -> void = __clib__buffer_seek
+reset(buf: Buffer) -> void = __clib__buffer_reset
+clear(buf: Buffer) -> void = __clib__buffer_clear
+to_str(buf: Buffer) -> str = __clib__buffer_to_str
+slice(buf: Buffer, start: i64, n: i64) -> str = __clib__buffer_slice

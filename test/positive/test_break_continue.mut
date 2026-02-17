@@ -1,0 +1,60 @@
+# Test break and continue in while and for loops
+
+# --- break in while ---
+i: i64 = 0
+while True
+    if i == 5
+        break
+    end
+    i += 1
+end
+print(i)
+
+# --- continue in while ---
+total: i64 = 0
+j: i64 = 0
+while j < 10
+    j += 1
+    if j % 2 == 0
+        continue
+    end
+    total += j
+end
+print(total)
+
+# --- break in for ---
+found: i64 = -1
+nums: List[i64] = List[i64]()
+append(nums, 10)
+append(nums, 20)
+append(nums, 30)
+append(nums, 40)
+for n:i64 in nums
+    if n == 30
+        found = n
+        break
+    end
+end
+print(found)
+
+# --- continue in for ---
+sum: i64 = 0
+for k:i64 in range(10)
+    if k < 5
+        continue
+    end
+    sum += k
+end
+print(sum)
+
+# --- nested break (inner only) ---
+count: i64 = 0
+for a:i64 in range(5)
+    for b:i64 in range(5)
+        if b == 2
+            break
+        end
+        count += 1
+    end
+end
+print(count)

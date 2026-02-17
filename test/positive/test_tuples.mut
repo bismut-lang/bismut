@@ -1,0 +1,123 @@
+# Test 1: Basic tuple creation and destructuring
+def get_pair() -> (i64, str)
+    return (42, "hello")
+end
+
+a, b := get_pair()
+print(a)
+print(b)
+
+# Test 2: Tuple with 3 elements
+def get_triple() -> (i64, f64, bool)
+    return (10, 3.14, True)
+end
+
+x, y, z := get_triple()
+print(x)
+print(y)
+print(z)
+
+# Test 3: Tuple as variable
+t := (100, "world")
+p, q := t
+print(p)
+print(q)
+
+# Test 4: Tuple in function parameter
+def sum_pair(pair: (i64, i64)) -> i64
+    a, b := pair
+    return a + b
+end
+
+result := sum_pair((3, 7))
+print(result)
+
+# Test 5: Tuple with ref types (string) — proper refcounting
+def make_greeting(name: str) -> (str, i64)
+    return ("hello " + name, 42)
+end
+
+msg, code := make_greeting("bismut")
+print(msg)
+print(code)
+
+# Test 6: Tuple return with local variables (borrow check)
+def local_tuple() -> (str, str)
+    a: str = "first"
+    b: str = "second"
+    return (a, b)
+end
+
+s1, s2 := local_tuple()
+print(s1)
+print(s2)
+
+# Test 7: Nested tuple destructuring (outer only)
+def get_nested() -> (i64, (str, bool))
+    return (1, ("nested", True))
+end
+
+n, inner := get_nested()
+print(n)
+s, flag := inner
+print(s)
+print(flag)
+
+# Test 8: Tuple with class elements
+class Point
+    x: i64
+    y: i64
+    def init(self, x: i64, y: i64)
+        self.x = x
+        self.y = y
+    end
+end
+
+def make_point() -> (Point, str)
+    p := Point(10, 20)
+    return (p, "origin")
+end
+
+pt, label := make_point()
+print(pt.x)
+print(pt.y)
+print(label)
+
+# Test 9: Tuple in control flow
+def classify(n: i64) -> (str, bool)
+    if n > 0
+        return ("positive", True)
+    end
+    return ("non-positive", False)
+end
+
+desc, pos := classify(5)
+print(desc)
+print(pos)
+desc2, pos2 := classify(-3)
+print(desc2)
+print(pos2)
+
+# Test 10: Multiple destructurings from same function
+a1, b1 := get_pair()
+a2, b2 := get_pair()
+print(a1)
+print(b1)
+print(a2)
+print(b2)
+
+# Test 11: Tuple assigned to typed variable
+tv: (i64, str) = (99, "typed")
+m, n2 := tv
+print(m)
+print(n2)
+
+# Test 12: Tuple with all primitive types
+def all_prims() -> (i64, f64, bool)
+    return (42, 2.718, False)
+end
+
+ai, af, ab := all_prims()
+print(ai)
+print(af)
+print(ab)

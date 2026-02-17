@@ -1,0 +1,90 @@
+# pathutils.mut -- Path manipulation utilities
+#
+# Shared path helpers used by import_resolver, mutlib, and main.
+
+extern string
+import strutils as su
+
+def _is_sep(c: i64) -> bool
+    if c == '/'
+        return True
+    end
+    @if __WIN__
+    if c == '\\'
+        return True
+    end
+    @end
+    return False
+end
+
+def path_join(a: str, b: str) -> str
+    if len(a) == 0
+        return b
+    end
+    if _is_sep(a[len(a) - 1])
+        return string.concat(a, b)
+    end
+    @if __WIN__
+    return string.concat(string.concat(a, "\\"), b)
+    @else
+    return string.concat(string.concat(a, "/"), b)
+    @end
+end
+
+def path_dir(path: str) -> str
+    i := len(path) - 1
+    while i >= 0
+        if _is_sep(path[i])
+            if i == 0
+                return "/"
+            end
+            return string.substr(path, 0, i)
+        end
+        i -= 1
+    end
+    return "."
+end
+
+def path_normalize(path: str) -> str
+    parts := su.split(path, "/")
+    @if __WIN__
+    # Also split on backslash
+    expanded: List[str] = List[str]()
+    j: i64 = 0
+    while j < len(parts)
+        sub := su.split(parts[j], "\\")
+        k: i64 = 0
+        while k < len(sub)
+            append(expanded, sub[k])
+            k += 1
+        end
+        j += 1
+    end
+    parts = expanded
+    @end
+    result: List[str] = List[str]()
+    i: i64 = 0
+    while i < len(parts)
+        p := parts[i]
+        if p == "." or len(p) == 0
+            # skip
+        elif p == ".."
+            if len(result) > 0 and result[len(result) - 1] != ".."
+                pop(result)
+            else
+                append(result, p)
+            end
+        else
+            append(result, p)
+        end
+        i += 1
+    end
+    if len(result) == 0
+        return "."
+    end
+    out := su.join(result, "/")
+    if len(path) > 0 and path[0] == '/'
+        return string.concat("/", out)
+    end
+    return out
+end

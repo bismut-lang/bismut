@@ -1,0 +1,5 @@
+# Negative: return wrong type from function
+
+def get_name() -> str
+    return 42
+end

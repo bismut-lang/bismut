@@ -1,0 +1,666 @@
+# lexer.mut — Bismut language lexer built on the generic lexer toolkit
+#
+# Tokenizes Bismut source code into a token stream.
+# Usage:
+#   import lexer
+#   tokens := lexer.tokenize("<file>", source)
+#   # tokens is List[lex.Token]
+
+extern string
+import langtools.lex
+import langtools.sink
+import strutils as su
+
+# ─── Token kinds ──────────────────────────────────────────────────────
+# Base kinds (from lex module):
+#   EOF=0, IDENT=1, INT=2, FLOAT=3, STRING=4,
+#   NEWLINE=5, ERROR=6, CHAR=7, USER=100
+#
+# Bismut-specific kinds start at USER (100).
+
+# ─── Comment collection (side-channel for doc comments) ──────────────
+# Standalone comments (first non-whitespace on their line) are recorded
+# with (line, text) for doc-comment extraction by the parser.
+
+_comment_lines: List[i64] = List[i64]()
+_comment_texts: List[str] = List[str]()
+
+def get_comment_count() -> i64
+    return len(_comment_lines)
+end
+
+def get_comment_line(i: i64) -> i64
+    return _comment_lines[i]
+end
+
+def get_comment_text(i: i64) -> str
+    return _comment_texts[i]
+end
+
+enum TokenKind
+    # Keywords (100+)
+    DEF = 100, IF, ELIF, ELSE, WHILE, RETURN, BREAK, CONTINUE
+    END, TRUE, FALSE, NONE, CLASS, FOR, IN
+    INTERFACE, IMPORT, AS, EXTERN, ENUM, CONST, STATIC, IS, STRUCT
+    NOT, KW_AND, KW_OR
+
+    # Multi-char operators (200+)
+    ARROW = 200, WALRUS, EQ, NE, LE, GE
+    SHL_ASSIGN, SHR_ASSIGN, SHL, SHR
+    ADD_ASSIGN, SUB_ASSIGN, MUL_ASSIGN, DIV_ASSIGN, MOD_ASSIGN
+    BAND_ASSIGN, BOR_ASSIGN, XOR_ASSIGN
+
+    # Single-char (250+)
+    LPAREN = 250, RPAREN, LBRACKET, RBRACKET, COMMA, SEMI
+    COLON, DOT, ASSIGN, PLUS, MINUS, STAR, SLASH, PERCENT
+    LT, GT, AMP, PIPE, CARET, TILDE, LBRACE, RBRACE
+end
+
+# ─── Keyword table ────────────────────────────────────────────────────
+
+def make_keywords() -> Dict[str, i64]
+    return Dict[str, i64]() {
+        "def": TokenKind.DEF,
+        "if": TokenKind.IF,
+        "elif": TokenKind.ELIF,
+        "else": TokenKind.ELSE,
+        "while": TokenKind.WHILE,
+        "return": TokenKind.RETURN,
+        "break": TokenKind.BREAK,
+        "continue": TokenKind.CONTINUE,
+        "end": TokenKind.END,
+        "True": TokenKind.TRUE,
+        "False": TokenKind.FALSE,
+        "None": TokenKind.NONE,
+        "class": TokenKind.CLASS,
+        "for": TokenKind.FOR,
+        "in": TokenKind.IN,
+        "interface": TokenKind.INTERFACE,
+        "import": TokenKind.IMPORT,
+        "as": TokenKind.AS,
+        "extern": TokenKind.EXTERN,
+        "enum": TokenKind.ENUM,
+        "const": TokenKind.CONST,
+        "static": TokenKind.STATIC,
+        "is": TokenKind.IS,
+        "struct": TokenKind.STRUCT,
+        "not": TokenKind.NOT,
+        "and": TokenKind.KW_AND,
+        "or": TokenKind.KW_OR
+    }
+end
+
+# ─── Multi-char operator table (longest first for max-munch) ─────────
+
+def make_multi_ops() -> List[str]
+    return List[str]() {
+        # 3-char first
+        "<<=", ">>=",
+        # 2-char
+        "->", ":=", "==", "!=", "<=", ">=",
+        "<<", ">>",
+        "+=", "-=", "*=", "/=", "%=",
+        "&=", "|=", "^="
+    }
+end
+
+# Token kinds for multi ops (parallel to make_multi_ops order)
+def make_multi_kinds() -> List[i64]
+    return List[i64]() {
+        TokenKind.SHL_ASSIGN, TokenKind.SHR_ASSIGN,
+        TokenKind.ARROW, TokenKind.WALRUS, TokenKind.EQ, TokenKind.NE, TokenKind.LE, TokenKind.GE,
+        TokenKind.SHL, TokenKind.SHR,
+        TokenKind.ADD_ASSIGN, TokenKind.SUB_ASSIGN, TokenKind.MUL_ASSIGN,
+        TokenKind.DIV_ASSIGN, TokenKind.MOD_ASSIGN,
+        TokenKind.BAND_ASSIGN, TokenKind.BOR_ASSIGN, TokenKind.XOR_ASSIGN
+    }
+end
+
+# ─── Single-char punctuation lookup ──────────────────────────────────
+
+def single_kind(c: i64) -> i64
+    if c == '('
+        return TokenKind.LPAREN
+    end
+    if c == ')'
+        return TokenKind.RPAREN
+    end
+    if c == '['
+        return TokenKind.LBRACKET
+    end
+    if c == ']'
+        return TokenKind.RBRACKET
+    end
+    if c == ','
+        return TokenKind.COMMA
+    end
+    if c == ';'
+        return TokenKind.SEMI
+    end
+    if c == ':'
+        return TokenKind.COLON
+    end
+    if c == '.'
+        return TokenKind.DOT
+    end
+    if c == '='
+        return TokenKind.ASSIGN
+    end
+    if c == '+'
+        return TokenKind.PLUS
+    end
+    if c == '-'
+        return TokenKind.MINUS
+    end
+    if c == '*'
+        return TokenKind.STAR
+    end
+    if c == '/'
+        return TokenKind.SLASH
+    end
+    if c == '%'
+        return TokenKind.PERCENT
+    end
+    if c == '<'
+        return TokenKind.LT
+    end
+    if c == '>'
+        return TokenKind.GT
+    end
+    if c == '!'
+        return -1
+    end
+    if c == '&'
+        return TokenKind.AMP
+    end
+    if c == '|'
+        return TokenKind.PIPE
+    end
+    if c == '^'
+        return TokenKind.CARET
+    end
+    if c == '~'
+        return TokenKind.TILDE
+    end
+    if c == '{'
+        return TokenKind.LBRACE
+    end
+    if c == '}'
+        return TokenKind.RBRACE
+    end
+    return -1
+end
+
+def is_single_char(c: i64) -> bool
+    return single_kind(c) != -1
+end
+
+# ─── Token kind name (for debugging) ─────────────────────────────────
+
+def kind_name(k: i64) -> str
+    # Base kinds
+    if k == lex.TokenKind.EOF
+        return "EOF"
+    end
+    if k == lex.TokenKind.IDENT
+        return "IDENT"
+    end
+    if k == lex.TokenKind.INT
+        return "INT"
+    end
+    if k == lex.TokenKind.FLOAT
+        return "FLOAT"
+    end
+    if k == lex.TokenKind.STRING
+        return "STRING"
+    end
+    if k == lex.TokenKind.NEWLINE
+        return "NEWLINE"
+    end
+    if k == lex.TokenKind.ERROR
+        return "ERROR"
+    end
+    if k == lex.TokenKind.CHAR
+        return "CHAR"
+    end
+    # Keywords
+    if k == TokenKind.DEF
+        return "DEF"
+    end
+    if k == TokenKind.IF
+        return "IF"
+    end
+    if k == TokenKind.ELIF
+        return "ELIF"
+    end
+    if k == TokenKind.ELSE
+        return "ELSE"
+    end
+    if k == TokenKind.WHILE
+        return "WHILE"
+    end
+    if k == TokenKind.RETURN
+        return "RETURN"
+    end
+    if k == TokenKind.BREAK
+        return "BREAK"
+    end
+    if k == TokenKind.CONTINUE
+        return "CONTINUE"
+    end
+    if k == TokenKind.END
+        return "END"
+    end
+    if k == TokenKind.TRUE
+        return "TRUE"
+    end
+    if k == TokenKind.FALSE
+        return "FALSE"
+    end
+    if k == TokenKind.NONE
+        return "NONE"
+    end
+    if k == TokenKind.CLASS
+        return "CLASS"
+    end
+    if k == TokenKind.FOR
+        return "FOR"
+    end
+    if k == TokenKind.IN
+        return "IN"
+    end
+    if k == TokenKind.INTERFACE
+        return "INTERFACE"
+    end
+    if k == TokenKind.IMPORT
+        return "IMPORT"
+    end
+    if k == TokenKind.AS
+        return "AS"
+    end
+    if k == TokenKind.EXTERN
+        return "EXTERN"
+    end
+    if k == TokenKind.ENUM
+        return "ENUM"
+    end
+    if k == TokenKind.CONST
+        return "CONST"
+    end
+    if k == TokenKind.STATIC
+        return "STATIC"
+    end
+    if k == TokenKind.IS
+        return "IS"
+    end
+    if k == TokenKind.STRUCT
+        return "STRUCT"
+    end
+    if k == TokenKind.NOT
+        return "NOT"
+    end
+    if k == TokenKind.KW_AND
+        return "AND"
+    end
+    if k == TokenKind.KW_OR
+        return "OR"
+    end
+    # Operators
+    if k == TokenKind.ARROW
+        return "->"
+    end
+    if k == TokenKind.WALRUS
+        return ":="
+    end
+    if k == TokenKind.EQ
+        return "=="
+    end
+    if k == TokenKind.NE
+        return "!="
+    end
+    if k == TokenKind.LE
+        return "<="
+    end
+    if k == TokenKind.GE
+        return ">="
+    end
+    if k == TokenKind.SHL_ASSIGN
+        return "<<="
+    end
+    if k == TokenKind.SHR_ASSIGN
+        return ">>="
+    end
+    if k == TokenKind.SHL
+        return "<<"
+    end
+    if k == TokenKind.SHR
+        return ">>"
+    end
+    if k == TokenKind.KW_AND
+        return "and"
+    end
+    if k == TokenKind.KW_OR
+        return "or"
+    end
+    if k == TokenKind.ADD_ASSIGN
+        return "+="
+    end
+    if k == TokenKind.SUB_ASSIGN
+        return "-="
+    end
+    if k == TokenKind.MUL_ASSIGN
+        return "*="
+    end
+    if k == TokenKind.DIV_ASSIGN
+        return "/="
+    end
+    if k == TokenKind.MOD_ASSIGN
+        return "%="
+    end
+    if k == TokenKind.BAND_ASSIGN
+        return "&="
+    end
+    if k == TokenKind.BOR_ASSIGN
+        return "|="
+    end
+    if k == TokenKind.XOR_ASSIGN
+        return "^="
+    end
+    if k == TokenKind.LPAREN
+        return "("
+    end
+    if k == TokenKind.RPAREN
+        return ")"
+    end
+    if k == TokenKind.LBRACKET
+        return "["
+    end
+    if k == TokenKind.RBRACKET
+        return "]"
+    end
+    if k == TokenKind.COMMA
+        return ","
+    end
+    if k == TokenKind.SEMI
+        return ";"
+    end
+    if k == TokenKind.COLON
+        return ":"
+    end
+    if k == TokenKind.DOT
+        return "."
+    end
+    if k == TokenKind.ASSIGN
+        return "="
+    end
+    if k == TokenKind.PLUS
+        return "+"
+    end
+    if k == TokenKind.MINUS
+        return "-"
+    end
+    if k == TokenKind.STAR
+        return "*"
+    end
+    if k == TokenKind.SLASH
+        return "/"
+    end
+    if k == TokenKind.PERCENT
+        return "%"
+    end
+    if k == TokenKind.LT
+        return "<"
+    end
+    if k == TokenKind.GT
+        return ">"
+    end
+    if k == TokenKind.NOT
+        return "not"
+    end
+    if k == TokenKind.AMP
+        return "&"
+    end
+    if k == TokenKind.PIPE
+        return "|"
+    end
+    if k == TokenKind.CARET
+        return "^"
+    end
+    if k == TokenKind.TILDE
+        return "~"
+    end
+    if k == TokenKind.LBRACE
+        return "{"
+    end
+    if k == TokenKind.RBRACE
+        return "}"
+    end
+    return "???"
+end
+
+# ─── Char literal detection ──────────────────────────────────────────
+
+def try_char_literal(lx: lex.Lexer) -> lex.Token
+    # Try to lex a char literal: 'x' or '\n' etc.
+    # If not a valid char literal, returns ERROR (caller falls back to string).
+    saved := lx.save_pos()
+    ln := lx.line
+    cl := lx.col
+    start := lx.pos
+    lx.advance()  # consume opening '
+
+    c := lx.peek()
+    if c == '\\'
+        lx.advance()
+        esc := lx.peek()
+        if esc == 'n' or esc == 't' or esc == 'r' or esc == '\\' or esc == '\'' or esc == '"' or esc == '0'
+            lx.advance()
+        else
+            # not a valid char literal escape
+            lx.restore_pos(saved)
+            return lex.Token(lex.TokenKind.ERROR, "", ln, cl)
+        end
+    else
+        lx.advance()
+    end
+
+    if lx.peek() == '\''
+        lx.advance()  # consume closing '
+        return lex.Token(lex.TokenKind.CHAR, lx.slice(start, lx.pos), ln, cl)
+    end
+
+    # not a char literal
+    lx.restore_pos(saved)
+    return lex.Token(lex.TokenKind.ERROR, "", ln, cl)
+end
+
+# ─── Skip whitespace and comments, return NEWLINE if any ─────────────
+
+def skip_ws(lx: lex.Lexer) -> lex.Token
+    # Skips spaces/tabs/CR and # comments.
+    # Returns a NEWLINE token if newlines were consumed, else EOF as sentinel.
+    # Standalone comments (preceded by newline or at start of file) are
+    # recorded in _comment_lines/_comment_texts for doc-comment extraction.
+    saw_nl: bool = False
+
+    while not lx.eof()
+        # spaces / tabs / CR
+        lx.skip_whitespace()
+
+        if lx.eof()
+            break
+        end
+
+        if lx.peek() == '#'
+            comment_line := lx.line
+            lx.advance()
+            # skip one leading space
+            if not lx.eof() and lx.peek() == ' '
+                lx.advance()
+            end
+            text_start := lx.pos
+            lx.skip_line()
+            text := lx.slice(text_start, lx.pos)
+            # Record standalone comments
+            if saw_nl or comment_line == 1
+                append(_comment_lines, comment_line)
+                append(_comment_texts, text)
+            end
+        elif lx.peek() == '\n'
+            saw_nl = True
+            while not lx.eof() and lx.peek() == '\n'
+                lx.advance()
+            end
+        else
+            break
+        end
+    end
+
+    if saw_nl
+        return lex.Token(lex.TokenKind.NEWLINE, "\n", lx.line, lx.col)
+    end
+    return lex.Token(lex.TokenKind.EOF, "", lx.line, lx.col)
+end
+
+# ─── Escape validation ────────────────────────────────────────────────
+
+def _validate_string_escapes(tok: lex.Token) -> lex.Token
+    # Check for unknown escape sequences in string literals
+    s := tok.lexeme
+    i: i64 = 1  # skip opening quote
+    end_pos := len(s) - 1  # skip closing quote
+    # Handle triple-quoted strings
+    if len(s) >= 6
+        c0 := s[0]
+        if s[1] == c0 and s[2] == c0
+            i = 3
+            end_pos = len(s) - 3
+        end
+    end
+    while i < end_pos
+        c := s[i]
+        if c == '\\'
+            i += 1
+            if i < end_pos
+                esc := s[i]
+                if esc != 'n' and esc != 't' and esc != 'r' and esc != '\\' and esc != '\'' and esc != '"'
+                    return lex.Token(lex.TokenKind.ERROR, format("unknown escape '\\{}'", string.chr(esc)), tok.line, tok.col)
+                end
+            end
+        end
+        i += 1
+    end
+    return tok
+end
+
+# ─── Lex one token ───────────────────────────────────────────────────
+
+def lex_token(lx: lex.Lexer, kw: Dict[str, i64], multi_ops: List[str], multi_kinds: List[i64]) -> lex.Token
+    c := lx.peek()
+
+    # Identifier or keyword
+    if su.is_ident_start(c)
+        tok := lx.read_ident()
+        return tok.classify(kw)
+    end
+
+    # Number
+    if su.is_digit(c)
+        return lx.read_number()
+    end
+
+    # String / char literals
+    if c == '"'
+        # Check for triple-quoted
+        if lx.peek_at(1) == '"' and lx.peek_at(2) == '"'
+            return _validate_string_escapes(lx.read_triple_string('"'))
+        end
+        return _validate_string_escapes(lx.read_string('"'))
+    end
+    if c == '\''
+        # Check for triple-quoted
+        if lx.peek_at(1) == '\'' and lx.peek_at(2) == '\''
+            return _validate_string_escapes(lx.read_triple_string('\''))
+        end
+        # Try char literal first
+        char_tok := try_char_literal(lx)
+        if not char_tok.is_error()
+            return char_tok
+        end
+        # Fall back to string
+        return _validate_string_escapes(lx.read_string('\''))
+    end
+
+    # Multi-char operators (longest-first)
+    i: i64 = 0
+    while i < len(multi_ops)
+        if lx.starts_with(multi_ops[i])
+            ln := lx.line
+            cl := lx.col
+            op_str := multi_ops[i]
+            lx.advance_n(len(op_str))
+            return lex.Token(multi_kinds[i], op_str, ln, cl)
+        end
+        i += 1
+    end
+
+    # Single-char punctuation
+    sk := single_kind(c)
+    if sk != -1
+        ln := lx.line
+        cl := lx.col
+        lx.advance()
+        return lex.Token(sk, string.chr(c), ln, cl)
+    end
+
+    # Unknown character — error
+    ln := lx.line
+    cl := lx.col
+    lx.advance()
+    return lex.Token(lex.TokenKind.ERROR, format("unexpected character '{}'", string.chr(c)), ln, cl)
+end
+
+# ─── Tokenize ─────────────────────────────────────────────────────────
+
+def tokenize(file: str, source: str, s: sink.Sink) -> List[lex.Token]
+    _comment_lines = List[i64]()
+    _comment_texts = List[str]()
+    lx := lex.Lexer(file, source)
+    lx.normalize_int = True
+    kw := make_keywords()
+    multi_ops := make_multi_ops()
+    multi_kinds := make_multi_kinds()
+    tokens := List[lex.Token]()
+    paren_depth: i64 = 0
+
+    while True
+        # Skip whitespace and comments, emit NEWLINE if any
+        nl := skip_ws(lx)
+        if nl.kind == lex.TokenKind.NEWLINE and paren_depth == 0
+            append(tokens, nl)
+        end
+
+        if lx.eof()
+            append(tokens, lex.Token(lex.TokenKind.EOF, "", lx.line, lx.col))
+            return tokens
+        end
+
+        tok := lex_token(lx, kw, multi_ops, multi_kinds)
+        if tok.is_error()
+            s.error(file, tok.line, tok.col, len(tok.lexeme), tok.lexeme)
+        end
+
+        k := tok.kind
+        if k == TokenKind.LPAREN or k == TokenKind.LBRACKET or k == TokenKind.LBRACE
+            paren_depth += 1
+        elif k == TokenKind.RPAREN or k == TokenKind.RBRACKET or k == TokenKind.RBRACE
+            if paren_depth > 0
+                paren_depth -= 1
+            end
+        end
+
+        append(tokens, tok)
+    end
+
+    return tokens
+end

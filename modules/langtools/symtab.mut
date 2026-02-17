@@ -1,0 +1,76 @@
+# symtab.mut — Scoped symbol table
+#
+# Nested-scope name→value mapping for name resolution and typechecking.
+#
+# Usage:
+#   import langtools.symtab
+#   st := symtab.SymbolTable()
+#   st.enter_scope()
+#   st.define("x", "i64")
+#   print(st.lookup("x"))    # "i64"
+#   st.leave_scope()
+#   print(st.lookup("x"))    # ""  (not found)
+
+extern string
+
+class SymbolTable
+    scopes: List[Dict[str, str]]
+
+    def init(self)
+        self.scopes = List[Dict[str, str]]()
+    end
+
+    def enter_scope(self)
+        append(self.scopes, Dict[str, str]())
+    end
+
+    def leave_scope(self)
+        n := len(self.scopes)
+        if n == 0
+            return
+        end
+        pop(self.scopes)
+    end
+
+    def define(self, name: str, value: str) -> bool
+        n := len(self.scopes)
+        if n == 0
+            return False
+        end
+        top := self.scopes[n - 1]
+        if has(top, name)
+            return False
+        end
+        top[name] = value
+        return True
+    end
+
+    def lookup(self, name: str) -> str
+        i := len(self.scopes) - 1
+        while i >= 0
+            scope := self.scopes[i]
+            if has(scope, name)
+                return scope[name]
+            end
+            i -= 1
+        end
+        return ""
+    end
+
+    def has(self, name: str) -> bool
+        return self.lookup(name) != ""
+    end
+
+    def has_local(self, name: str) -> bool
+        n := len(self.scopes)
+        if n == 0
+            return False
+        end
+        top := self.scopes[n - 1]
+        return has(top, name)
+    end
+
+    def depth(self) -> i64
+        return len(self.scopes)
+    end
+end

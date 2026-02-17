@@ -1,0 +1,3 @@
+# Negative: missing 'end' to close for
+for i:i64 in range(10)
+    print(i)

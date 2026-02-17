@@ -1,0 +1,853 @@
+# cg_expr.mut -- Expression emission for C code generation
+#
+# emit_expr(cg, e) returns (C_expr_string, type_name) for any expression node.
+# emit_call(cg, e) handles all call types: builtins, methods, constructors, etc.
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import parser as mp
+import strutils as su
+import cg_types as ct
+import type_utils as tu
+import cg_state as cs
+
+# ─── Helpers ─────────────────────────────────────────────────────────
+
+def _join(parts: List[str], sep: str) -> str
+    sb := stringbuilder.new()
+    i: i64 = 0
+    while i < len(parts)
+        if i > 0
+            stringbuilder.append_str(sb, sep)
+        end
+        stringbuilder.append_str(sb, parts[i])
+        i += 1
+    end
+    return stringbuilder.build(sb)
+end
+
+# Emit an argument with materialization for owned refs
+def _ba(cg: cs.CodeGen, e: pars.Node, i: i64) -> str
+    arg := e.child(i + 1)
+    ac, aty := emit_expr(cg, arg)
+    return cg.emit_arg_safe(arg, ac, aty)
+end
+
+# Emit an argument with type
+def _ba_typed(cg: cs.CodeGen, e: pars.Node, i: i64) -> (str, str)
+    arg := e.child(i + 1)
+    ac, aty := emit_expr(cg, arg)
+    safe := cg.emit_arg_safe(arg, ac, aty)
+    return (safe, aty)
+end
+
+# ─── Main dispatch ───────────────────────────────────────────────────
+
+def emit_expr(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    k := e.kind
+
+    # ---- Literals ----
+    if k == mp.NodeKind.INT_LIT
+        return (e.value, e.ty)
+    end
+    if k == mp.NodeKind.FLOAT_LIT
+        return (e.value, e.ty)
+    end
+    if k == mp.NodeKind.BOOL_LIT
+        if e.value == "True"
+            return ("true", "bool")
+        end
+        return ("false", "bool")
+    end
+    if k == mp.NodeKind.CHAR_LIT
+        val := ct.unescape_char(e.value)
+        return (string.i64_to_str(val), e.ty)
+    end
+    if k == mp.NodeKind.STRING_LIT
+        c_str := ct.unescape_string(e.value)
+        name := cg.intern_string(c_str)
+        return (string.concat("&", name), "str")
+    end
+    if k == mp.NodeKind.NONE_LIT
+        return ("NULL", "none")
+    end
+
+    # ---- Identifier ----
+    if k == mp.NodeKind.IDENT
+        name := e.value
+        # Extern constant
+        if has(cg.extern_info.constants, name)
+            c_ex := cg.extern_info.const_c_expr(name)
+            b_ty := cg.extern_info.const_type(name)
+            return (format("({})", c_ex), b_ty)
+        end
+        # Function pointer reference
+        ty := e.ty
+        if ty != None
+            if tu.is_fn_type(ty) and has(cg.func_sigs, name)
+                return (format("__lang_rt_fn_{}", name), ty)
+            end
+        end
+        vi := cg.lookup(name)
+        return (vi.c_name, vi.ty)
+    end
+
+    # ---- Unary ----
+    if k == mp.NodeKind.UNARY
+        rhs_c, rhs_ty := emit_expr(cg, e.child(0))
+        op := e.value
+        if op == "-"
+            return (format("(-({}))", rhs_c), rhs_ty)
+        end
+        if op == "not"
+            return (format("(!({}))", rhs_c), "bool")
+        end
+        if op == "~"
+            return (format("(~({}))", rhs_c), rhs_ty)
+        end
+    end
+
+    # ---- Is ----
+    if k == mp.NodeKind.IS
+        lhs_c, lhs_ty := emit_expr(cg, e.child(0))
+        rhs_ty := e.value
+        if rhs_ty == "None"
+            if ct.is_iface(lhs_ty)
+                return (format("({}.obj == NULL)", lhs_c), "bool")
+            end
+            return (format("({} == NULL)", lhs_c), "bool")
+        end
+        # Interface variable: runtime vtable check
+        if ct.is_iface(lhs_ty)
+            if ct.is_class(rhs_ty) and has(cg.class_implements, rhs_ty)
+                ifaces := cg.class_implements[rhs_ty]
+                if string.find(ifaces, lhs_ty) >= 0
+                    return (format("({}.vtbl == &__lang_rt_vtbl_{}_as_{})", lhs_c, rhs_ty, lhs_ty), "bool")
+                end
+            end
+            return ("0", "bool")
+        end
+        # Concrete type: compile-time check
+        if lhs_ty == rhs_ty
+            return ("1", "bool")
+        end
+        return ("0", "bool")
+    end
+
+    # ---- As (downcast) ----
+    if k == mp.NodeKind.AS
+        lhs_c, lhs_ty := emit_expr(cg, e.child(0))
+        target := e.value
+        iface_ty := lhs_ty
+        src := cg.src(e)
+        tmp := cg.new_tmp()
+        cg.w(format("__lang_rt_Iface_{} {} = {};", iface_ty, tmp, lhs_c))
+        return (format("((__lang_rt_Class_{}*)__lang_rt_downcast({}, {}.obj, {}.vtbl, &__lang_rt_vtbl_{}_as_{}, \"{}\"))", target, src, tmp, tmp, target, iface_ty, target), target)
+    end
+
+    # ---- Binary ----
+    if k == mp.NodeKind.BINARY
+        return _emit_binary(cg, e)
+    end
+
+    # ---- Call ----
+    if k == mp.NodeKind.CALL
+        return emit_call(cg, e)
+    end
+
+    # ---- Member access ----
+    if k == mp.NodeKind.MEMBER
+        return _emit_member(cg, e)
+    end
+
+    # ---- Index ----
+    if k == mp.NodeKind.INDEX
+        return _emit_index(cg, e)
+    end
+
+    # ---- List literal ----
+    if k == mp.NodeKind.LIST_LIT
+        return _emit_list_lit(cg, e)
+    end
+
+    # ---- Dict literal ----
+    if k == mp.NodeKind.DICT_LIT
+        return _emit_dict_lit(cg, e)
+    end
+
+    # ---- Tuple expression ----
+    if k == mp.NodeKind.TUPLE_EXPR
+        return _emit_tuple(cg, e)
+    end
+
+    return ("0", "i64")
+end
+
+# ─── Binary ──────────────────────────────────────────────────────────
+
+def _emit_binary(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    op := e.value
+    src := cg.src(e)
+
+    # Short-circuit 'and' and 'or'
+    if op == "and" or op == "or"
+        a_c, _a_ty := emit_expr(cg, e.child(0))
+        tmp := cg.new_tmp()
+        cg.w(format("bool {} = {};", tmp, a_c))
+        cg.flush_pending_releases(src)
+        if op == "and"
+            cg.w(format("if ({}) {{", tmp))
+        else
+            cg.w(format("if (!{}) {{", tmp))
+        end
+        cg.ind += 1
+        b_c, _b_ty := emit_expr(cg, e.child(1))
+        cg.w(format("{} = {};", tmp, b_c))
+        cg.flush_pending_releases(src)
+        cg.ind -= 1
+        cg.w("}")
+        return (tmp, "bool")
+    end
+
+    a_c, a_ty := emit_expr(cg, e.child(0))
+    b_c, b_ty := emit_expr(cg, e.child(1))
+
+    # Materialize owned ref-type operands so they get cleaned up
+    if ct.is_ref_type(a_ty) and not cs.expr_is_borrowed(e.child(0))
+        tmp_a := cg.new_tmp()
+        cg.w(format("{} {} = {};", ct.c_type(a_ty), tmp_a, a_c))
+        append(cg.pending_releases, cs.VarInfo(tmp_a, a_ty))
+        a_c = tmp_a
+    end
+    if ct.is_ref_type(b_ty) and not cs.expr_is_borrowed(e.child(1))
+        tmp_b := cg.new_tmp()
+        cg.w(format("{} {} = {};", ct.c_type(b_ty), tmp_b, b_c))
+        append(cg.pending_releases, cs.VarInfo(tmp_b, b_ty))
+        b_c = tmp_b
+    end
+
+    # Comparisons -> bool
+    if op == "==" or op == "!=" or op == "<" or op == "<=" or op == ">" or op == ">="
+        # String equality
+        if a_ty == "str" and b_ty == "str"
+            if op == "=="
+                return (format("__lang_rt_str_eq({}, {})", a_c, b_c), "bool")
+            end
+            if op == "!="
+                return (format("!(__lang_rt_str_eq({}, {}))", a_c, b_c), "bool")
+            end
+        end
+        # None comparisons
+        if (a_ty == "none" or b_ty == "none") and (op == "==" or op == "!=")
+            if ct.is_iface(a_ty)
+                return (format("({}.obj {} NULL)", a_c, op), "bool")
+            end
+            if ct.is_iface(b_ty)
+                return (format("({}.obj {} NULL)", b_c, op), "bool")
+            end
+            return (format("({} {} {})", a_c, op, b_c), "bool")
+        end
+        return (format("({} {} {})", a_c, op, b_c), "bool")
+    end
+
+    # Arithmetic
+    if op == "+" or op == "-" or op == "*" or op == "/" or op == "%"
+        if op == "+" and a_ty == "str"
+            return (format("__lang_rt_str_concat({}, {}, {})", src, a_c, b_c), "str")
+        end
+        return (format("({} {} {})", a_c, op, b_c), a_ty)
+    end
+
+    # Bitwise
+    if op == "&" or op == "|" or op == "^" or op == "<<" or op == ">>"
+        return (format("({} {} {})", a_c, op, b_c), a_ty)
+    end
+
+    return ("0", "i64")
+end
+
+# ─── Member access ───────────────────────────────────────────────────
+
+def _emit_member(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    member := e.value
+
+    # Enum variant: EnumName.VARIANT
+    if e.child_count() > 0 and e.child(0).kind == mp.NodeKind.IDENT
+        obj_name := e.child(0).value
+        if ct.is_enum(obj_name)
+            if has(cg.enum_variants, obj_name)
+                variants := cg.enum_variants[obj_name]
+                if has(variants, member)
+                    val := variants[member]
+                    return (string.i64_to_str(val), "i64")
+                end
+            end
+        end
+    end
+
+    obj_c, obj_ty := emit_expr(cg, e.child(0))
+
+    # Materialize owned ref-type objects
+    if ct.is_ref_type(obj_ty) and not cs.expr_is_borrowed(e.child(0))
+        tmp := cg.new_tmp()
+        cg.w(format("{} {} = {};", ct.c_type(obj_ty), tmp, obj_c))
+        append(cg.pending_releases, cs.VarInfo(tmp, obj_ty))
+        obj_c = tmp
+    end
+
+    # Struct field: dot access
+    if ct.is_struct(obj_ty) and has(cg.struct_defs, obj_ty)
+        st := cg.struct_defs[obj_ty]
+        i: i64 = 0
+        while i < st.child_count()
+            fd := st.child(i)
+            if fd.kind == mp.NodeKind.FIELD_DECL and fd.value == member
+                fty := tu.type_node_to_str(fd.child(0))
+                return (format("{}.{}", obj_c, ct.ci(member)), fty)
+            end
+            i += 1
+        end
+    end
+
+    # Class field: arrow access
+    if ct.is_class(obj_ty) and has(cg.class_defs, obj_ty)
+        src := cg.src(e)
+        cg.w(format("__lang_rt_null_check({}, {});", obj_c, src))
+        cls := cg.class_defs[obj_ty]
+        i: i64 = 0
+        while i < cls.child_count()
+            fd := cls.child(i)
+            if fd.kind == mp.NodeKind.FIELD_DECL and fd.value == member
+                fty := tu.type_node_to_str(fd.child(0))
+                return (format("{}->{}", obj_c, ct.ci(member)), fty)
+            end
+            i += 1
+        end
+    end
+
+    return ("0", "i64")
+end
+
+# ─── Index access ────────────────────────────────────────────────────
+
+def _emit_index(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    src := cg.src(e)
+    obj_c, obj_ty := emit_expr(cg, e.child(0))
+    idx_arg := e.child(1)
+    idx_c, idx_ty := emit_expr(cg, idx_arg)
+    idx_c = cg.emit_arg_safe(idx_arg, idx_c, idx_ty)
+
+    if tu.is_list_type(obj_ty)
+        elem := tu.list_elem_type(obj_ty)
+        tag := ct.elem_tag(elem)
+        cg.used_list_tags[tag] = 1
+        return (format("__lang_rt_list_{}_get({}, {}, {})", tag, src, obj_c, idx_c), elem)
+    end
+    if tu.is_dict_type(obj_ty)
+        val := tu.dict_val_type(obj_ty)
+        combined := ct.dict_combined_tag(obj_ty)
+        cg.used_dict_tags[combined] = 1
+        return (format("__lang_rt_dict_{}_get({}, {}, {})", combined, src, obj_c, idx_c), val)
+    end
+    if obj_ty == "str"
+        return (format("__lang_rt_str_get({}, {}, {})", src, obj_c, idx_c), "i64")
+    end
+    return ("0", "i64")
+end
+
+# ─── List literal ────────────────────────────────────────────────────
+
+def _emit_list_lit(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    tp := e.value
+    tag := ct.elem_tag(tp)
+    cg.used_list_tags[tag] = 1
+    src := cg.src(e)
+    result_ty := format("List[{}]", tp)
+    tmp := cg.new_tmp()
+    cg.w(format("{} {} = __lang_rt_list_{}_new({});", ct.c_type(result_ty), tmp, tag, src))
+    i: i64 = 0
+    while i < e.child_count()
+        arg := e.child(i)
+        ec, ety := emit_expr(cg, arg)
+        ec = cg.emit_arg_safe(arg, ec, ety)
+        ec = cg.maybe_wrap_iface(ec, ety, tp)
+        cg.w(format("__lang_rt_list_{}_push({}, {}, {});", tag, src, tmp, ec))
+        i += 1
+    end
+    return (tmp, result_ty)
+end
+
+# ─── Dict literal ───────────────────────────────────────────────────
+
+def _emit_dict_lit(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    tp := e.value
+    combined := ct.dict_combined_tag_from_inner(tp)
+    cg.used_dict_tags[combined] = 1
+    src := cg.src(e)
+    result_ty := format("Dict[{}]", tp)
+    parts := tu.split_type_list(tp)
+    ktp := parts[0]
+    vtp := parts[1]
+    tmp := cg.new_tmp()
+    cg.w(format("{} {} = __lang_rt_dict_{}_new({});", ct.c_type(result_ty), tmp, combined, src))
+    i: i64 = 0
+    while i < e.child_count()
+        key_arg := e.child(i)
+        val_arg := e.child(i + 1)
+        kc, _kty := emit_expr(cg, key_arg)
+        kc = cg.emit_arg_safe(key_arg, kc, ktp)
+        vc, vty := emit_expr(cg, val_arg)
+        vc = cg.emit_arg_safe(val_arg, vc, vty)
+        vc = cg.maybe_wrap_iface(vc, vty, vtp)
+        cg.w(format("__lang_rt_dict_{}_set({}, {}, {}, {});", combined, src, tmp, kc, vc))
+        i += 2
+    end
+    return (tmp, result_ty)
+end
+
+# ─── Tuple expression ───────────────────────────────────────────────
+
+def _emit_tuple(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    tuple_ty := e.ty
+    target_elems := tu.tuple_elem_types(tuple_ty)
+    sn := ct.tuple_struct_name(tuple_ty)
+    cg.mark_type_use(tuple_ty)
+
+    # Emit all elements first
+    elem_cs: List[str] = List[str]()
+    elem_tys: List[str] = List[str]()
+    i: i64 = 0
+    while i < e.child_count()
+        ec, ety := emit_expr(cg, e.child(i))
+        ec = cg.maybe_wrap_iface(ec, ety, target_elems[i])
+        append(elem_cs, ec)
+        append(elem_tys, ety)
+        i += 1
+    end
+
+    tmp := cg.new_tmp()
+    sb := stringbuilder.new()
+    i = 0
+    while i < len(elem_cs)
+        if i > 0
+            stringbuilder.append_str(sb, ", ")
+        end
+        stringbuilder.append_str(sb, format(".f{} = {}", i, elem_cs[i]))
+        i += 1
+    end
+    fields := stringbuilder.build(sb)
+    cg.w(format("{} {} = {{{}}};", sn, tmp, fields))
+
+    # Retain borrowed elements in the tuple
+    src := cg.src(e)
+    i = 0
+    while i < len(elem_cs)
+        if ct.is_ref_type(target_elems[i]) and cs.expr_is_borrowed(e.child(i))
+            cg.emit_retain_value(target_elems[i], format("{}.f{}", tmp, i), src)
+        end
+        i += 1
+    end
+    return (tmp, tuple_ty)
+end
+
+# ─── Call dispatch ───────────────────────────────────────────────────
+
+def emit_call(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    callee := e.child(0)
+    src := cg.src(e)
+    nargs := e.child_count() - 1
+
+    # ---- Method call: obj.method(args) ----
+    if callee.kind == mp.NodeKind.MEMBER
+        return _emit_method_call(cg, e)
+    end
+
+    # ---- Expression fn pointer call ----
+    if callee.kind != mp.NodeKind.IDENT
+        callee_c, callee_ty := emit_expr(cg, callee)
+        if tu.is_fn_type(callee_ty)
+            args: List[str] = List[str]()
+            i: i64 = 0
+            while i < nargs
+                append(args, _ba(cg, e, i))
+                i += 1
+            end
+            ret_ty := tu.fn_ret_type(callee_ty)
+            return (format("{}({})", callee_c, _join(args, ", ")), ret_ty)
+        end
+        return ("0", "i64")
+    end
+
+    name := callee.value
+
+    # ---- Variable fn pointer call ----
+    if not has(cg.func_sigs, name) and not tu.is_cast_type(name) and not has(cg.class_defs, name)
+        vi := cg.lookup(name)
+        if tu.is_fn_type(vi.ty)
+            args: List[str] = List[str]()
+            i: i64 = 0
+            while i < nargs
+                append(args, _ba(cg, e, i))
+                i += 1
+            end
+            ret_ty := tu.fn_ret_type(vi.ty)
+            return (format("{}({})", vi.c_name, _join(args, ", ")), ret_ty)
+        end
+    end
+
+    # ---- Type cast: i8(x), i16(x), ..., f64(x) ----
+    if tu.is_cast_type(name)
+        ac, _aty := _ba_typed(cg, e, 0)
+        target_c := ct.prim_c(name)
+        cast_str := format("(({})({}))", target_c, ac)
+        return (cast_str, name)
+    end
+
+    # ---- print ----
+    if name == "print"
+        ac, aty := _ba_typed(cg, e, 0)
+        if ct.is_enum(aty)
+            aty = "i64"
+        end
+        if tu.is_cast_type(aty)
+            return (format("__lang_rt_print_{}({})", aty, ac), "void")
+        end
+        if aty == "bool"
+            return (format("__lang_rt_print_bool({})", ac), "void")
+        end
+        if aty == "str"
+            return (format("__lang_rt_print_str({})", ac), "void")
+        end
+        printf_str := format("printf(\"%%p\\n\", (void*)({}))", ac)
+        return (printf_str, "void")
+    end
+
+    # ---- format ----
+    if name == "format"
+        return _emit_format_call(cg, e)
+    end
+
+    # ---- range ----
+    if name == "range"
+        cg.used_list_tags["I64"] = 1
+        if nargs == 1
+            return (format("__lang_rt_range({}, 0, {}, 1)", src, _ba(cg, e, 0)), "List[i64]")
+        end
+        if nargs == 2
+            return (format("__lang_rt_range({}, {}, {}, 1)", src, _ba(cg, e, 0), _ba(cg, e, 1)), "List[i64]")
+        end
+        return (format("__lang_rt_range({}, {}, {}, {})", src, _ba(cg, e, 0), _ba(cg, e, 1), _ba(cg, e, 2)), "List[i64]")
+    end
+
+    # ---- keys ----
+    if name == "keys"
+        ac, aty := _ba_typed(cg, e, 0)
+        if tu.is_dict_type(aty)
+            combined := ct.dict_combined_tag(aty)
+            kty := tu.dict_key_type(aty)
+            cg.used_dict_tags[combined] = 1
+            ktag := ct.elem_tag(kty)
+            cg.used_list_tags[ktag] = 1
+            return (format("__lang_rt_dict_{}_keys({}, {})", combined, src, ac), format("List[{}]", kty))
+        end
+        return ("0", "List[str]")
+    end
+
+    # ---- len ----
+    if name == "len"
+        ac, aty := _ba_typed(cg, e, 0)
+        if tu.is_list_type(aty)
+            tag := ct.elem_tag(tu.list_elem_type(aty))
+            return (format("__lang_rt_list_{}_len({})", tag, ac), "i64")
+        end
+        if tu.is_dict_type(aty)
+            combined := ct.dict_combined_tag(aty)
+            return (format("__lang_rt_dict_{}_len({})", combined, ac), "i64")
+        end
+        if aty == "str"
+            return (format("((int64_t)({})->len)", ac), "i64")
+        end
+        return ("0", "i64")
+    end
+
+    # ---- Generic container ops: name[T](...) ----
+    tp := e.value
+    if len(tp) > 0
+        tag := ct.elem_tag(tp)
+        if name == "List"
+            cg.used_list_tags[tag] = 1
+            return (format("__lang_rt_list_{}_new({})", tag, src), format("List[{}]", tp))
+        end
+        if name == "append"
+            cg.used_list_tags[tag] = 1
+            a0 := _ba(cg, e, 0)
+            a1_c, a1_ty := _ba_typed(cg, e, 1)
+            a1_c = cg.maybe_wrap_iface(a1_c, a1_ty, tp)
+            return (format("__lang_rt_list_{}_push({}, {}, {})", tag, src, a0, a1_c), "void")
+        end
+        if name == "get"
+            cg.used_list_tags[tag] = 1
+            return (format("__lang_rt_list_{}_get({}, {}, {})", tag, src, _ba(cg, e, 0), _ba(cg, e, 1)), tp)
+        end
+        if name == "set"
+            cg.used_list_tags[tag] = 1
+            a0 := _ba(cg, e, 0)
+            a1 := _ba(cg, e, 1)
+            a2_c, a2_ty := _ba_typed(cg, e, 2)
+            a2_c = cg.maybe_wrap_iface(a2_c, a2_ty, tp)
+            return (format("__lang_rt_list_{}_set({}, {}, {}, {})", tag, src, a0, a1, a2_c), "void")
+        end
+        if name == "pop"
+            cg.used_list_tags[tag] = 1
+            return (format("__lang_rt_list_{}_pop({}, {})", tag, src, _ba(cg, e, 0)), tp)
+        end
+        if name == "remove"
+            cg.used_list_tags[tag] = 1
+            return (format("__lang_rt_list_{}_remove({}, {}, {})", tag, src, _ba(cg, e, 0), _ba(cg, e, 1)), "void")
+        end
+        if name == "Dict"
+            combined := ct.dict_combined_tag_from_inner(tp)
+            cg.used_dict_tags[combined] = 1
+            return (format("__lang_rt_dict_{}_new({})", combined, src), format("Dict[{}]", tp))
+        end
+        if name == "put"
+            combined := ct.dict_combined_tag_from_inner(tp)
+            cg.used_dict_tags[combined] = 1
+            a0 := _ba(cg, e, 0)
+            a1 := _ba(cg, e, 1)
+            a2_c, a2_ty := _ba_typed(cg, e, 2)
+            # tp is "K,V", extract val type for interface wrapping
+            parts := tu.split_type_list(tp)
+            vtp := parts[1]
+            a2_c = cg.maybe_wrap_iface(a2_c, a2_ty, vtp)
+            return (format("__lang_rt_dict_{}_set({}, {}, {}, {})", combined, src, a0, a1, a2_c), "void")
+        end
+        if name == "lookup"
+            combined := ct.dict_combined_tag_from_inner(tp)
+            cg.used_dict_tags[combined] = 1
+            # tp is "K,V", extract val type for return
+            parts := tu.split_type_list(tp)
+            vtp := parts[1]
+            return (format("__lang_rt_dict_{}_get({}, {}, {})", combined, src, _ba(cg, e, 0), _ba(cg, e, 1)), vtp)
+        end
+        if name == "has"
+            combined := ct.dict_combined_tag_from_inner(tp)
+            cg.used_dict_tags[combined] = 1
+            return (format("__lang_rt_dict_{}_has({}, {}, {})", combined, src, _ba(cg, e, 0), _ba(cg, e, 1)), "bool")
+        end
+        # User-defined generic function
+        mangled := format("{}_{}", name, tag)
+        if has(cg.func_sigs, mangled)
+            sig := cg.func_sigs[mangled]
+            ret_ty := tu.sig_ret(sig)
+            args: List[str] = List[str]()
+            i: i64 = 0
+            while i < nargs
+                append(args, _ba(cg, e, i))
+                i += 1
+            end
+            return (format("__lang_rt_fn_{}({})", mangled, _join(args, ", ")), ret_ty)
+        end
+    end
+
+    # ---- Constructor: ClassName(args) ----
+    if has(cg.class_defs, name)
+        cls := cg.class_defs[name]
+        init_param_tys: List[str] = List[str]()
+        # Find init method to get param types
+        mi: i64 = 0
+        while mi < cls.child_count()
+            c := cls.child(mi)
+            if c.kind == mp.NodeKind.FUNC_DECL and c.value == "init"
+                pb := tu.func_params_block(c)
+                pi: i64 = 0
+                while pi < pb.child_count()
+                    p := pb.child(pi)
+                    if p.value != "self"
+                        append(init_param_tys, tu.type_node_to_str(p.child(0)))
+                    end
+                    pi += 1
+                end
+            end
+            mi += 1
+        end
+        args: List[str] = List[str]()
+        append(args, src)
+        i: i64 = 0
+        while i < nargs
+            ac, aty := _ba_typed(cg, e, i)
+            if i < len(init_param_tys)
+                ac = cg.maybe_wrap_iface(ac, aty, init_param_tys[i])
+            end
+            append(args, ac)
+            i += 1
+        end
+        return (format("__lang_rt_class_{}_new({})", name, _join(args, ", ")), name)
+    end
+
+    # ---- Struct construction: StructName(field1, ...) ----
+    if has(cg.struct_defs, name)
+        st := cg.struct_defs[name]
+        sb := stringbuilder.new()
+        fi: i64 = 0
+        ai: i64 = 0
+        while fi < st.child_count()
+            fd := st.child(fi)
+            if fd.kind == mp.NodeKind.FIELD_DECL
+                if ai > 0
+                    stringbuilder.append_str(sb, ", ")
+                end
+                ac := _ba(cg, e, ai)
+                stringbuilder.append_str(sb, format(".{} = {}", ct.ci(fd.value), ac))
+                ai += 1
+            end
+            fi += 1
+        end
+        ct_str := ct.c_type(name)
+        return (format("({}){{{}}}", ct_str, stringbuilder.build(sb)), name)
+    end
+
+    # ---- User-defined function ----
+    if not has(cg.func_sigs, name)
+        return ("0", "i64")
+    end
+    sig := cg.func_sigs[name]
+    param_tys := tu.sig_params(sig)
+    ret_ty := tu.sig_ret(sig)
+
+    args: List[str] = List[str]()
+    i: i64 = 0
+    while i < nargs
+        ac, aty := _ba_typed(cg, e, i)
+        if i < len(param_tys)
+            ac = cg.maybe_wrap_iface(ac, aty, param_tys[i])
+        end
+        append(args, ac)
+        i += 1
+    end
+    return (format("__lang_rt_fn_{}({})", name, _join(args, ", ")), ret_ty)
+end
+
+# ─── Method call ─────────────────────────────────────────────────────
+
+def _emit_method_call(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    callee := e.child(0)
+    nargs := e.child_count() - 1
+    obj_c, obj_ty := emit_expr(cg, callee.child(0))
+    src := cg.src(e)
+
+    # Materialize owned ref-type receivers
+    if ct.is_ref_type(obj_ty) and not cs.expr_is_borrowed(callee.child(0))
+        tmp := cg.new_tmp()
+        cg.w(format("{} {} = {};", ct.c_type(obj_ty), tmp, obj_c))
+        append(cg.pending_releases, cs.VarInfo(tmp, obj_ty))
+        obj_c = tmp
+    end
+
+    mname := callee.value
+
+    # Interface vtable dispatch
+    if ct.is_iface(obj_ty) and has(cg.iface_defs, obj_ty)
+        cg.w(format("__lang_rt_null_check({}.obj, {});", obj_c, src))
+        iface := cg.iface_defs[obj_ty]
+        args: List[str] = List[str]()
+        append(args, format("{}.obj", obj_c))
+        i: i64 = 0
+        while i < nargs
+            append(args, _ba(cg, e, i))
+            i += 1
+        end
+        # Find return type from method sig
+        mi: i64 = 0
+        while mi < iface.child_count()
+            ms := iface.child(mi)
+            if ms.kind == mp.NodeKind.METHOD_SIG and ms.value == mname
+                ret_ty := tu.type_node_to_str(ms.child(1))
+                return (format("{}.vtbl->{}({})", obj_c, ct.ci(mname), _join(args, ", ")), ret_ty)
+            end
+            mi += 1
+        end
+    end
+
+    # Build args list: obj + remaining args
+    args: List[str] = List[str]()
+    append(args, obj_c)
+    i: i64 = 0
+    while i < nargs
+        append(args, _ba(cg, e, i))
+        i += 1
+    end
+
+    # Struct method
+    if ct.is_struct(obj_ty) and has(cg.struct_defs, obj_ty)
+        st := cg.struct_defs[obj_ty]
+        mi: i64 = 0
+        while mi < st.child_count()
+            c := st.child(mi)
+            if c.kind == mp.NodeKind.FUNC_DECL and c.value == mname
+                ret_ty := tu.func_ret_type_str(c)
+                return (format("__lang_rt_struct_{}_{}({})", obj_ty, mname, _join(args, ", ")), ret_ty)
+            end
+            mi += 1
+        end
+    end
+
+    # Class method
+    if ct.is_class(obj_ty) and has(cg.class_defs, obj_ty)
+        cg.w(format("__lang_rt_null_check({}, {});", obj_c, src))
+        cls := cg.class_defs[obj_ty]
+        mi: i64 = 0
+        while mi < cls.child_count()
+            c := cls.child(mi)
+            if c.kind == mp.NodeKind.FUNC_DECL and c.value == mname
+                ret_ty := tu.func_ret_type_str(c)
+                return (format("__lang_rt_class_{}_{}({})", obj_ty, mname, _join(args, ", ")), ret_ty)
+            end
+            mi += 1
+        end
+    end
+
+    return ("0", "i64")
+end
+
+# ─── format() builtin ───────────────────────────────────────────────
+
+def _emit_format_call(cg: cs.CodeGen, e: pars.Node) -> (str, str)
+    src := cg.src(e)
+    fmt_c := _ba(cg, e, 0)
+    nargs := e.child_count() - 2
+
+    if nargs <= 0
+        result := cg.new_tmp()
+        cg.w(format("__lang_rt_Str* {} = __lang_rt_format({}, {}, NULL, 0);", result, src, fmt_c))
+        return (result, "str")
+    end
+
+    arr := cg.new_tmp()
+    cg.w(format("__lang_rt_FmtArg {}[{}];", arr, nargs))
+    i: i64 = 0
+    while i < nargs
+        ac, aty := _ba_typed(cg, e, i + 1)
+        if ct.is_enum(aty)
+            aty = "i64"
+        end
+        idx := string.i64_to_str(i)
+        if aty == "i8" or aty == "i16" or aty == "i32" or aty == "i64"
+            cg.w(format("{}[{}].tag = __LANG_RT_FMT_I64; {}[{}].val.i = (int64_t)({});", arr, idx, arr, idx, ac))
+        elif aty == "u8" or aty == "u16" or aty == "u32" or aty == "u64"
+            cg.w(format("{}[{}].tag = __LANG_RT_FMT_U64; {}[{}].val.u = (uint64_t)({});", arr, idx, arr, idx, ac))
+        elif aty == "f32" or aty == "f64"
+            cg.w(format("{}[{}].tag = __LANG_RT_FMT_F64; {}[{}].val.f = (double)({});", arr, idx, arr, idx, ac))
+        elif aty == "bool"
+            cg.w(format("{}[{}].tag = __LANG_RT_FMT_BOOL; {}[{}].val.b = ({});", arr, idx, arr, idx, ac))
+        elif aty == "str"
+            cg.w(format("{}[{}].tag = __LANG_RT_FMT_STR; {}[{}].val.s = ({});", arr, idx, arr, idx, ac))
+        end
+        i += 1
+    end
+    result := cg.new_tmp()
+    cg.w(format("__lang_rt_Str* {} = __lang_rt_format({}, {}, {}, {});", result, src, fmt_c, arr, nargs))
+    return (result, "str")
+end

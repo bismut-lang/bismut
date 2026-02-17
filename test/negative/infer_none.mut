@@ -1,0 +1,2 @@
+# Negative: cannot infer type from None in := declaration
+x := None

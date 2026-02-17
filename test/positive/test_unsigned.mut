@@ -1,0 +1,77 @@
+# Test unsigned integer types: u8, u16, u32, u64
+
+# Basic declarations
+a: u8 = 255
+b: u16 = 65535
+c: u32 = 100000
+d: u64 = 123456789
+
+print(a)     # expect: 255
+print(b)     # expect: 65535
+print(c)     # expect: 100000
+print(d)     # expect: 123456789
+
+# Arithmetic
+x: u32 = 10
+y: u32 = 3
+print(x + y)   # expect: 13
+print(x - y)   # expect: 7
+print(x * y)   # expect: 30
+print(x / y)   # expect: 3
+print(x % y)   # expect: 1
+
+# Bitwise on unsigned
+m: u8 = 0xFF
+n: u8 = 0x0F
+print(m & n)   # expect: 15
+print(m | n)   # expect: 255
+print(m ^ n)   # expect: 240
+
+# Casting between signed and unsigned
+s: i64 = 42
+t: u32 = u32(s)
+print(t)       # expect: 42
+
+u: u64 = 100
+v: i32 = i32(u)
+print(v)       # expect: 100
+
+# Cast to/from u8
+w: u8 = u8(200)
+print(w)       # expect: 200
+
+# Comparison
+if a == 255
+    print(1)   # expect: 1
+end
+
+# Shorthand (:= defaults to i64, not u — that's expected)
+# Explicit unsigned in list
+nums: List[u32] = List[u32]()
+append(nums, 10)
+append(nums, 20)
+append(nums, 30)
+print(len(nums))   # expect: 3
+print(nums[0])     # expect: 10
+print(nums[2])     # expect: 30
+
+# EXPECTED:
+# 255
+# 65535
+# 100000
+# 123456789
+# 13
+# 7
+# 30
+# 3
+# 1
+# 15
+# 255
+# 240
+# 42
+# 100
+# 200
+# 1
+# 3
+# 10
+# 30

@@ -1,0 +1,80 @@
+# test_nested_types.mut — test complex nested data structures
+
+# ============================================================
+# 1. Class with List field
+# ============================================================
+
+class Team
+    name: str
+    scores: List[i64]
+
+    def init(self, name: str, scores: List[i64])
+        self.name = name
+        self.scores = scores
+    end
+end
+
+s := List[i64]()
+append(s, 10)
+append(s, 20)
+append(s, 30)
+t: Team = Team("Alpha", s)
+print(t.name)            # Alpha
+print(t.scores[0])       # 10
+print(t.scores[2])       # 30
+print(len(t.scores))     # 3
+
+# ============================================================
+# 2. Class with Dict field
+# ============================================================
+
+class Config
+    data: Dict[str, str]
+
+    def init(self, data: Dict[str, str])
+        self.data = data
+    end
+end
+
+d := Dict[str, str]()
+d["host"] = "localhost"
+d["port"] = "8080"
+cfg: Config = Config(d)
+print(cfg.data["host"])   # localhost
+print(cfg.data["port"])   # 8080
+
+# ============================================================
+# 3. Dict of classes
+# ============================================================
+
+class Item
+    label: str
+    count: i64
+
+    def init(self, label: str, count: i64)
+        self.label = label
+        self.count = count
+    end
+end
+
+items: Dict[str, Item] = Dict[str, Item]()
+items["a"] = Item("Apple", 5)
+items["b"] = Item("Banana", 3)
+print(items["a"].label)   # Apple
+print(items["b"].count)   # 3
+
+# ============================================================
+# 4. List of classes (already proven, but verify subscript)
+# ============================================================
+
+people: List[Item] = List[Item]()
+append(people, Item("X", 1))
+append(people, Item("Y", 2))
+print(people[0].label)    # X
+print(people[1].count)    # 2
+
+people[0] = Item("Z", 9)
+print(people[0].label)    # Z
+print(people[0].count)    # 9
+
+print("all nested type tests passed")

@@ -1,0 +1,211 @@
+# preprocessor.mut — Bismut text-level preprocessor
+#
+# Runs before the lexer. Processes @-directives line-by-line and
+# strips/includes text based on compile-time constants.
+#
+# Directives:
+#   @define NAME          Define a constant
+#   @if NAME              Include following lines if NAME is defined
+#   @elif NAME            Else-if branch
+#   @else                 Else branch
+#   @end                  End conditional block
+#
+# Usage:
+#   import preprocessor as pp
+#   result := pp.preprocess(source, "<file>")
+
+extern string
+extern stringbuilder
+extern os
+import strutils as su
+
+# ─── Error helper ─────────────────────────────────────────────────────
+
+def pp_error(file: str, line: i64, msg: str)
+    print(format("{}: preprocessor error: {}", file, msg))
+    os.exit(1)
+end
+
+# ─── Stack entry ──────────────────────────────────────────────────────
+# We encode (parent_emitting, branch_taken) as a single i64:
+#   bit 0 = parent_emitting
+#   bit 1 = branch_taken
+
+def stack_new(parent_emitting: bool, branch_taken: bool) -> i64
+    val: i64 = 0
+    if parent_emitting
+        val = val | 1
+    end
+    if branch_taken
+        val = val | 2
+    end
+    return val
+end
+
+def stack_parent(entry: i64) -> bool
+    return (entry & 1) != 0
+end
+
+def stack_taken(entry: i64) -> bool
+    return (entry & 2) != 0
+end
+
+def stack_set_taken(entry: i64) -> i64
+    return entry | 2
+end
+
+# ─── Line parsing helpers ────────────────────────────────────────────
+
+def extract_name(stripped: str, prefix_len: i64, file: str, line_no: i64, directive: str) -> str
+    # Extract the name after a directive like "@define " (prefix_len=8)
+    rest := string.substr(stripped, prefix_len, len(stripped) - prefix_len)
+    name := su.trim(rest)
+    if len(name) == 0
+        pp_error(file, line_no, format("{} requires a name", directive))
+    end
+    return name
+end
+
+# ─── Main preprocessor ───────────────────────────────────────────────
+
+def preprocess(source: str, file: str) -> str
+    defs: List[str] = List[str]()
+    return preprocess_with_defines(source, file, defs)
+end
+
+def preprocess_with_defines(source: str, file: str, extra_defines: List[str]) -> str
+    # Defines set: we use Dict[str, i64] as a set (value=1 means defined)
+    defines: Dict[str, i64] = Dict[str, i64]()
+
+    # Check if extra_defines contains a platform override
+    has_platform_override: bool = False
+    i: i64 = 0
+    while i < len(extra_defines)
+        d := extra_defines[i]
+        if d == "__LINUX__" or d == "__MACOS__" or d == "__WIN__"
+            has_platform_override = True
+        end
+        i += 1
+    end
+
+    # Detect platform (unless overridden by extra_defines)
+    if not has_platform_override
+        @if __LINUX__
+        defines["__LINUX__"] = 1
+        @end
+        @if __MACOS__
+        defines["__MACOS__"] = 1
+        @end
+        @if __WIN__
+        defines["__WIN__"] = 1
+        @end
+    end
+
+    # Add extra defines
+    i = 0
+    while i < len(extra_defines)
+        defines[extra_defines[i]] = 1
+        i += 1
+    end
+
+    # Stack for nested @if blocks
+    stack: List[i64] = List[i64]()
+    emitting: bool = True
+
+    lines: List[str] = su.split(source, "\n")
+    out: List[str] = List[str]()
+    n := len(lines)
+    i = 0
+
+    while i < n
+        line := lines[i]
+        stripped := su.trim(line)
+
+        # @define NAME
+        if su.starts_with(stripped, "@define ")
+            if emitting
+                name := extract_name(stripped, 8, file, i + 1, "@define")
+                defines[name] = 1
+            end
+            i += 1
+            continue
+        end
+
+        # @if NAME
+        if su.starts_with(stripped, "@if ")
+            name := extract_name(stripped, 4, file, i + 1, "@if")
+            parent_emitting := emitting
+            cond := has(defines, name)
+            taken := cond
+            emitting = parent_emitting and cond
+            append(stack, stack_new(parent_emitting, taken))
+            i += 1
+            continue
+        end
+
+        # @elif NAME
+        if su.starts_with(stripped, "@elif ")
+            if len(stack) == 0
+                pp_error(file, i + 1, "@elif without matching @if")
+            end
+            name := extract_name(stripped, 6, file, i + 1, "@elif")
+            entry := stack[len(stack) - 1]
+            parent_emitting := stack_parent(entry)
+            taken := stack_taken(entry)
+            cond := has(defines, name)
+            if taken
+                emitting = False
+            else
+                emitting = parent_emitting and cond
+                if emitting
+                    stack[len(stack) - 1] = stack_set_taken(entry)
+                end
+            end
+            i += 1
+            continue
+        end
+
+        # @else
+        if stripped == "@else"
+            if len(stack) == 0
+                pp_error(file, i + 1, "@else without matching @if")
+            end
+            entry := stack[len(stack) - 1]
+            parent_emitting := stack_parent(entry)
+            taken := stack_taken(entry)
+            if taken
+                emitting = False
+            else
+                emitting = parent_emitting
+                stack[len(stack) - 1] = stack_set_taken(entry)
+            end
+            i += 1
+            continue
+        end
+
+        # @end
+        if stripped == "@end"
+            if len(stack) == 0
+                pp_error(file, i + 1, "@end without matching @if")
+            end
+            entry := pop(stack)
+            parent_emitting := stack_parent(entry)
+            emitting = parent_emitting
+            i += 1
+            continue
+        end
+
+        # Regular line — include if emitting
+        if emitting
+            append(out, line)
+        end
+
+        i += 1
+    end
+
+    if len(stack) > 0
+        pp_error(file, n, "unterminated @if block (missing @end)")
+    end
+
+    return su.join(out, "\n")
+end

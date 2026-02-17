@@ -1,0 +1,2 @@
+# Negative: invalid binary literal (no digits after 0b)
+x: i64 = 0bXX

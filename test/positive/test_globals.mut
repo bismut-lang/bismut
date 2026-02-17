@@ -1,0 +1,55 @@
+# Test global variables
+
+x: i64 = 42
+name: str = "hello"
+nums: List[i64] = List[i64]()
+
+def read_global() -> i64
+    return x
+end
+
+def read_name() -> str
+    return name
+end
+
+def mutate_global()
+    x = 100
+end
+
+def use_global_list()
+    append(nums, 1)
+    append(nums, 2)
+    append(nums, 3)
+end
+
+# Read globals from functions
+print(read_global())   # expect: 42
+print(read_name())     # expect: hello
+
+# Mutate and re-read
+mutate_global()
+print(read_global())   # expect: 100
+
+# Mutate list
+use_global_list()
+print(len(nums))       # expect: 3
+print(nums[0])         # expect: 1
+print(nums[2])         # expect: 3
+
+# Direct global access from top level
+print(x)               # expect: 100
+
+# Global with shorthand
+count := 0
+count = 999
+print(count)           # expect: 999
+
+# EXPECTED:
+# 42
+# hello
+# 100
+# 3
+# 1
+# 3
+# 100
+# 999

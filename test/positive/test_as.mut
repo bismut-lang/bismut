@@ -1,0 +1,106 @@
+# Test: 'as' downcast operator
+# expected:
+# Circle
+# 75
+# 5
+# Rect
+# 30
+# 10
+# 3
+# Circle r=7
+# Rect 4x5
+# big circle
+# not a rect
+
+interface IShape
+    def area(self) -> i64
+    def name(self) -> str
+end
+
+class Circle : IShape
+    r: i64
+
+    def init(self, r: i64)
+        self.r = r
+    end
+
+    def area(self) -> i64
+        return self.r * self.r * 3
+    end
+
+    def name(self) -> str
+        return "Circle"
+    end
+end
+
+class Rect : IShape
+    w: i64
+    h: i64
+
+    def init(self, w: i64, h: i64)
+        self.w = w
+        self.h = h
+    end
+
+    def area(self) -> i64
+        return self.w * self.h
+    end
+
+    def name(self) -> str
+        return "Rect"
+    end
+end
+
+# Basic downcast: interface -> class, access fields
+s: IShape = Circle(5)
+print(s.name())
+print(s.area())
+
+if s is Circle
+    c: Circle = s as Circle
+    print(c.r)
+end
+
+# Reassign to different class
+s = Rect(10, 3)
+print(s.name())
+print(s.area())
+
+if s is Rect
+    r: Rect = s as Rect
+    print(r.w)
+    print(r.h)
+end
+
+# Use downcast result directly in expressions
+s2: IShape = Circle(10)
+
+# List of interfaces with downcast
+shapes: List[IShape] = List[IShape]()
+append(shapes, Circle(7))
+append(shapes, Rect(4, 5))
+
+for sh:IShape in shapes
+    if sh is Circle
+        c2: Circle = sh as Circle
+        print("Circle r=7")
+    end
+    if sh is Rect
+        r2: Rect = sh as Rect
+        print("Rect 4x5")
+    end
+end
+
+if s2 is Circle
+    if (s2 as Circle).r > 5
+        print("big circle")
+    end
+end
+
+# is check that fails — should not enter branch
+s3: IShape = Circle(3)
+if s3 is Rect
+    print("WRONG")
+else
+    print("not a rect")
+end

@@ -1,0 +1,4 @@
+# ERROR: return wrong number of elements in tuple
+def get_pair() -> (i64, str)
+    return (1, "a", 3)
+end

@@ -1,0 +1,57 @@
+# Test visit.mut — generic AST visitor
+import langtools.pars
+import langtools.visit
+
+# --- Counter visitor: counts all nodes ---
+class Counter : visit.IVisitor
+    count: i64
+
+    def init(self)
+        self.count = 0
+    end
+
+    def visit(self, node: pars.Node, depth: i64) -> bool
+        self.count += 1
+        return True
+    end
+end
+
+# Build tree: root -> (a, b -> (c))
+root := pars.Node(0, "root", 1, 1)
+a := pars.Node(1, "a", 1, 2)
+b := pars.Node(2, "b", 1, 3)
+c := pars.Node(3, "c", 1, 4)
+b.add_child(c)
+root.add_child(a)
+root.add_child(b)
+
+cv := Counter()
+visit.walk(root, cv)
+print(cv.count)
+
+# --- Pruning visitor: skip children at depth 1 ---
+class Pruner : visit.IVisitor
+    seen: List[str]
+
+    def init(self)
+        self.seen = List[str]()
+    end
+
+    def visit(self, node: pars.Node, depth: i64) -> bool
+        append(self.seen, node.value)
+        if depth >= 1
+            return False
+        end
+        return True
+    end
+end
+
+sv := Pruner()
+visit.walk(root, sv)
+i: i64 = 0
+while i < len(sv.seen)
+    print(sv.seen[i])
+    i += 1
+end
+
+print("done")

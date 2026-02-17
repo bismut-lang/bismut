@@ -1,0 +1,43 @@
+# visit.mut — Generic AST visitor
+#
+# Interface-based AST walker. Users implement the IVisitor interface
+# with visit(node, depth) dispatched for every node. The walker handles
+# recursion over children.
+#
+# Usage:
+#   import langtools.pars
+#   import langtools.visit
+#
+#   class Printer : visit.IVisitor
+#       def visit(self, node: pars.Node, depth: i64) -> bool
+#           print(node.value)
+#           return True    # recurse into children
+#       end
+#   end
+#
+#   visit.walk(root, Printer())
+
+import langtools.pars
+
+interface IVisitor
+    def visit(self, node: pars.Node, depth: i64) -> bool
+end
+
+def walk(root: pars.Node, v: IVisitor)
+    walk_depth(root, v, 0)
+end
+
+def walk_depth(root: pars.Node, v: IVisitor, depth: i64)
+    if root == None
+        return
+    end
+    descend := v.visit(root, depth)
+    if not descend
+        return
+    end
+    i: i64 = 0
+    while i < root.child_count()
+        walk_depth(root.child(i), v, depth + 1)
+        i += 1
+    end
+end

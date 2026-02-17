@@ -1,0 +1,20 @@
+# Negative: assign field through interface variable
+
+interface IShape
+    def area(self) -> i64
+end
+
+class Circle : IShape
+    r: i64
+
+    def init(self, r: i64)
+        self.r = r
+    end
+
+    def area(self) -> i64
+        return self.r * self.r * 3
+    end
+end
+
+s: IShape = Circle(5)
+s.r = 10

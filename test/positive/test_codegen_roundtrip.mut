@@ -1,0 +1,125 @@
+# Round-trip test: parse + typecheck + codegen → C → compile → run → check output
+# Tests that the self-hosted codegen produces correct, executable C code.
+
+extern string
+extern stringbuilder
+extern filesystem
+extern os
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+import typecheck as tc
+import import_resolver as ir
+import codegen as gen_mod
+
+# ─── helper: parse + typecheck + generate ────────────────────────────
+
+def gen(src: str, name: str) -> str
+    s := sink.Sink()
+    prog := mp.parse(name, src, s)
+    if s.has_errors()
+        print(format("PARSE ERROR in {}", name))
+        i: i64 = 0
+        while i < s.count()
+            print(s.get(i).msg)
+            i += 1
+        end
+        return ""
+    end
+    tc.check(prog, s)
+    if s.has_errors()
+        print(format("TYPE ERROR in {}", name))
+        i: i64 = 0
+        while i < s.count()
+            print(s.get(i).msg)
+            i += 1
+        end
+        return ""
+    end
+    ext := ir.ExternInfo()
+    return gen_mod.generate_c(prog, name, ext, False)
+end
+
+# Run generated C: write to file, compile, run, return output
+def run_c(c_code: str, test_name: str) -> str
+    filesystem.write("/tmp/bismut_rt_test.c", c_code)
+    rc := os.exec("gcc -O0 -std=c99 -Irt -o /tmp/bismut_rt_test /tmp/bismut_rt_test.c -lm 2>&1")
+    if rc != 0
+        print(format("GCC FAIL in {}", test_name))
+        return "GCC_FAIL"
+    end
+    os.exec("/tmp/bismut_rt_test > /tmp/bismut_rt_out.txt 2>&1")
+    return filesystem.read("/tmp/bismut_rt_out.txt")
+end
+
+def check(test_name: str, actual: str, expected: str)
+    if actual == expected
+        print(format("OK  {}", test_name))
+    else
+        print(format("FAIL {}", test_name))
+        print(format("  expected: {}", expected))
+        print(format("  actual:   {}", actual))
+    end
+end
+
+# ─── Tests ────────────────────────────────────────────────────────────
+
+# Test 1: print integer literal
+c := gen("print(42)", "t1")
+out := run_c(c, "t1")
+check("print_int", out, "42\n")
+
+# Test 2: print bool
+c = gen("print(True)", "t2")
+out = run_c(c, "t2")
+check("print_bool", out, "true\n")
+
+# Test 3: variable + arithmetic
+c = gen("x: i64 = 10\ny: i64 = 20\nprint(x + y)", "t3")
+out = run_c(c, "t3")
+check("var_arith", out, "30\n")
+
+# Test 4: if/else
+src4 := "x: i64 = 5\nif x > 3\n    print(1)\nelse\n    print(0)\nend"
+c = gen(src4, "t4")
+out = run_c(c, "t4")
+check("if_else", out, "1\n")
+
+# Test 5: while loop
+src5 := "i: i64 = 0\nwhile i < 5\n    i += 1\nend\nprint(i)"
+c = gen(src5, "t5")
+out = run_c(c, "t5")
+check("while_loop", out, "5\n")
+
+# Test 6: function definition + call
+src6 := "def add(a: i64, b: i64) -> i64\n    return a + b\nend\nprint(add(3, 4))"
+c = gen(src6, "t6")
+out = run_c(c, "t6")
+check("func_call", out, "7\n")
+
+# Test 7: string literal
+src7 := "s: str = \"hello\"\nprint(s)"
+c = gen(src7, "t7")
+out = run_c(c, "t7")
+check("string_lit", out, "hello\n")
+
+# Test 8: nested if
+src8 := "x: i64 = 10\nif x > 5\n    if x > 8\n        print(1)\n    else\n        print(2)\n    end\nelse\n    print(3)\nend"
+c = gen(src8, "t8")
+out = run_c(c, "t8")
+check("nested_if", out, "1\n")
+
+# Test 9: multiple prints
+src9 := "print(1)\nprint(2)\nprint(3)"
+c = gen(src9, "t9")
+out = run_c(c, "t9")
+check("multi_print", out, "1\n2\n3\n")
+
+# Test 10: comparison operators
+src10 := "print(3 < 5)\nprint(5 < 3)"
+c = gen(src10, "t10")
+out = run_c(c, "t10")
+check("compare", out, "true\nfalse\n")
+
+print("--- done ---")

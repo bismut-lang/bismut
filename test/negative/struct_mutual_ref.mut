@@ -1,0 +1,10 @@
+# ERROR: mutual struct cycle — infinite size
+struct A
+    val: i64
+    b: B
+end
+
+struct B
+    val: i64
+    a: A
+end

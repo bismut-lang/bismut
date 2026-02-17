@@ -1,0 +1,81 @@
+# Test: interface support
+# Tests interface declaration, class implements, vtable dispatch,
+# interface variables, None comparison, and passing interfaces to functions.
+
+interface IShape
+    def area(self) -> f64
+    def name(self) -> str
+end
+
+class Circle : IShape
+    r: f64
+
+    def init(self, r: f64)
+        self.r = r
+    end
+
+    def area(self) -> f64
+        return self.r * self.r * 3.14159
+    end
+
+    def name(self) -> str
+        return "Circle"
+    end
+end
+
+class Rect : IShape
+    w: f64
+    h: f64
+
+    def init(self, w: f64, h: f64)
+        self.w = w
+        self.h = h
+    end
+
+    def area(self) -> f64
+        return self.w * self.h
+    end
+
+    def name(self) -> str
+        return "Rectangle"
+    end
+end
+
+# Function that accepts an interface parameter
+def print_shape(s: IShape)
+    print(s.name())
+    print(s.area())
+end
+
+# --- Test 1: basic vtable dispatch ---
+c := Circle(5.0)
+s: IShape = c
+print(s.name())
+print(s.area())
+
+# --- Test 2: different class, same interface ---
+r := Rect(3.0, 4.0)
+s2: IShape = r
+print(s2.name())
+print(s2.area())
+
+# --- Test 3: pass class to interface-typed function parameter ---
+print_shape(Circle(2.0))
+print_shape(Rect(6.0, 7.0))
+
+# --- Test 4: None comparison ---
+s3: IShape = None
+if s3 == None
+    print("s3 is None")
+end
+
+s3 = Circle(1.0)
+if s3 != None
+    print("s3 is not None")
+end
+
+# --- Test 5: reassign interface variable to different class ---
+s4: IShape = Circle(10.0)
+print(s4.name())
+s4 = Rect(2.0, 3.0)
+print(s4.name())

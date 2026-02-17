@@ -1,0 +1,18 @@
+# Negative: use 'as' on a non-interface type
+
+class Foo
+    x: i64
+    def init(self, x: i64)
+        self.x = x
+    end
+end
+
+class Bar
+    y: i64
+    def init(self, y: i64)
+        self.y = y
+    end
+end
+
+f := Foo(1)
+b: Bar = f as Bar

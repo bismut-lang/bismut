@@ -1,0 +1,2461 @@
+# typecheck.mut - Bismut type checker (self-hosted)
+#
+# Works on pars.Node AST from the parser. Annotates expression nodes with
+# resolved type strings (via Node.ty) and validates semantic correctness.
+#
+# Usage:
+#   import typecheck as tc
+#   tc.check(prog, sink)
+
+extern string
+extern stringbuilder
+import langtools.pars
+import langtools.sink
+import langtools.symtab
+import langtools.graph
+import strutils
+import parser as mp
+import type_utils as tu
+
+# ─── Type classification tables ──────────────────────────────────────
+# Using Dict[str, i64] as sets: has(d, key) == membership test.
+
+_BASE_TYPES := Dict[str, i64]() {
+    "i8": 1, "i16": 1, "i32": 1, "i64": 1,
+    "u8": 1, "u16": 1, "u32": 1, "u64": 1,
+    "f32": 1, "f64": 1,
+    "bool": 1, "str": 1, "void": 1
+}
+
+_INT_TYPES := Dict[str, i64]() {
+    "i8": 1, "i16": 1, "i32": 1, "i64": 1,
+    "u8": 1, "u16": 1, "u32": 1, "u64": 1
+}
+
+_FLOAT_TYPES := Dict[str, i64]() {
+    "f32": 1, "f64": 1
+}
+
+_NUM_TYPES := Dict[str, i64]() {
+    "i8": 1, "i16": 1, "i32": 1, "i64": 1,
+    "u8": 1, "u16": 1, "u32": 1, "u64": 1,
+    "f32": 1, "f64": 1
+}
+
+def elem_tag(t: str) -> str
+    if tu.has_prim_tag(t)
+        return tu.prim_tag(t)
+    end
+    return t
+end
+
+# ─── Info classes ────────────────────────────────────────────────────
+
+class ClassInfo
+    name: str
+    field_types: Dict[str, str]
+    method_params: Dict[str, str]
+    method_rets: Dict[str, str]
+    init_param_types: List[str]
+
+    def init(self, name: str)
+        self.name = name
+        self.field_types = Dict[str, str]()
+        self.method_params = Dict[str, str]()
+        self.method_rets = Dict[str, str]()
+        self.init_param_types = List[str]()
+    end
+end
+
+class StructInfo
+    name: str
+    field_types: Dict[str, str]
+    field_order: List[str]
+    method_params: Dict[str, str]
+    method_rets: Dict[str, str]
+
+    def init(self, name: str)
+        self.name = name
+        self.field_types = Dict[str, str]()
+        self.field_order = List[str]()
+        self.method_params = Dict[str, str]()
+        self.method_rets = Dict[str, str]()
+    end
+end
+
+class InterfaceInfo
+    name: str
+    method_params: Dict[str, str]
+    method_rets: Dict[str, str]
+
+    def init(self, name: str)
+        self.name = name
+        self.method_params = Dict[str, str]()
+        self.method_rets = Dict[str, str]()
+    end
+end
+
+# ─── Method signature encoding ───────────────────────────────────────
+# Methods are stored as encoded strings: "p1,p2,...|ret"
+# Empty params: "|ret"
+
+def encode_sig(params: List[str], ret: str) -> str
+    sb := stringbuilder.new()
+    i: i64 = 0
+    while i < len(params)
+        if i > 0
+            stringbuilder.append_str(sb, ",")
+        end
+        stringbuilder.append_str(sb, params[i])
+        i += 1
+    end
+    stringbuilder.append_str(sb, "|")
+    stringbuilder.append_str(sb, ret)
+    return stringbuilder.build(sb)
+end
+
+
+def func_type_param(n: pars.Node, i: i64) -> str
+    return n.child(i).value
+end
+
+
+# ─── Module-level type checker state ─────────────────────────────────
+
+_sink: sink.Sink = sink.Sink()
+_file: str = ""
+_prog: pars.Node = pars.Node(0, "", 0, 0)
+
+# Type registries (Dict[str, i64] used as sets)
+_class_names: Dict[str, i64] = Dict[str, i64]()
+_struct_names: Dict[str, i64] = Dict[str, i64]()
+_iface_names: Dict[str, i64] = Dict[str, i64]()
+_enum_names: Dict[str, i64] = Dict[str, i64]()
+
+# class_name -> comma-separated interface names
+_class_implements: Dict[str, str] = Dict[str, str]()
+
+# Type info tables
+_classes: Dict[str, ClassInfo] = Dict[str, ClassInfo]()
+_structs: Dict[str, StructInfo] = Dict[str, StructInfo]()
+_ifaces: Dict[str, InterfaceInfo] = Dict[str, InterfaceInfo]()
+
+# enum_name -> Dict[str, variant_name -> value as i64]
+_enum_variants: Dict[str, Dict[str, i64]] = Dict[str, Dict[str, i64]]()
+
+# Function signatures: name -> encoded "p1,p2,...|ret"
+_funcs: Dict[str, str] = Dict[str, str]()
+
+# Generic function templates: name -> FUNC_DECL node
+_generic_funcs: Dict[str, pars.Node] = Dict[str, pars.Node]()
+
+# Variable scopes: type string (prefixed "const:" for constants)
+_vars: symtab.SymbolTable = symtab.SymbolTable()
+
+# Context
+_cur_ret: str = ""
+_loop_depth: i64 = 0
+_cur_class: str = ""
+_cur_struct: str = ""
+
+# ─── Error reporting ─────────────────────────────────────────────────
+
+_had_error: bool = False
+
+def _error(line: i64, col: i64, msg: str)
+    _sink.error(_file, line, col, 0, msg)
+    _had_error = True
+end
+
+def _error_at(n: pars.Node, msg: str)
+    _error(n.line, n.col, msg)
+end
+
+# ─── Variable encoding ───────────────────────────────────────────────
+
+def _encode_var(ty: str, is_const: bool) -> str
+    if is_const
+        return string.concat("const:", ty)
+    end
+    return ty
+end
+
+def _var_ty(encoded: str) -> str
+    if strutils.starts_with(encoded, "const:")
+        return string.substr(encoded, 6, len(encoded) - 6)
+    end
+    return encoded
+end
+
+def _var_is_const(encoded: str) -> bool
+    return strutils.starts_with(encoded, "const:")
+end
+
+# ─── Type queries ────────────────────────────────────────────────────
+
+def _is_ref_type(t: str) -> bool
+    if t == "str"
+        return True
+    end
+    if tu.is_list_type(t) or tu.is_dict_type(t)
+        return True
+    end
+    if has(_class_names, t)
+        return True
+    end
+    if has(_iface_names, t)
+        return True
+    end
+    return False
+end
+
+def _is_truthy_type(t: str) -> bool
+    if t == "bool"
+        return True
+    end
+    resolved := _resolve_enum_ty(t)
+    if has(_INT_TYPES, resolved)
+        return True
+    end
+    if _is_ref_type(t)
+        return True
+    end
+    return False
+end
+
+def _resolve_enum_ty(ty: str) -> str
+    if has(_enum_names, ty)
+        return "i64"
+    end
+    return ty
+end
+
+def _assignable(src: str, dst: str) -> bool
+    if src == dst
+        return True
+    end
+    if _resolve_enum_ty(src) == _resolve_enum_ty(dst)
+        return True
+    end
+    if src == "none" and _is_ref_type(dst)
+        return True
+    end
+    if has(_iface_names, dst) and has(_class_implements, src)
+        ifaces := _class_implements[src]
+        # Check if dst is in the comma-separated list
+        parts := strutils.split(ifaces, ",")
+        i: i64 = 0
+        while i < len(parts)
+            if parts[i] == dst
+                return True
+            end
+            i += 1
+        end
+    end
+    return False
+end
+
+def _is_known(t: str) -> bool
+    if has(_BASE_TYPES, t)
+        return True
+    end
+    if has(_class_names, t)
+        return True
+    end
+    if has(_struct_names, t)
+        return True
+    end
+    if has(_iface_names, t)
+        return True
+    end
+    if has(_enum_names, t)
+        return True
+    end
+    if tu.is_list_type(t)
+        return _is_known(tu.list_elem_type(t))
+    end
+    if tu.is_dict_type(t)
+        return _is_known(tu.dict_key_type(t)) and _is_known(tu.dict_val_type(t))
+    end
+    if tu.is_fn_type(t)
+        pts := tu.fn_param_types(t)
+        i: i64 = 0
+        while i < len(pts)
+            if not _is_known(pts[i])
+                return False
+            end
+            i += 1
+        end
+        return _is_known(tu.fn_ret_type(t))
+    end
+    if tu.is_tuple_type(t)
+        elems := tu.tuple_elem_types(t)
+        i: i64 = 0
+        while i < len(elems)
+            if not _is_known(elems[i])
+                return False
+            end
+            i += 1
+        end
+        return True
+    end
+    return False
+end
+
+def _require_known(line: i64, col: i64, t: str)
+    if not _is_known(t)
+        _error(line, col, format("unknown type '{}'", t))
+    end
+end
+
+# ─── Scope helpers ───────────────────────────────────────────────────
+
+def _declare(name: str, ty: str, line: i64, col: i64, is_const: bool)
+    encoded := _encode_var(ty, is_const)
+    if not _vars.define(name, encoded)
+        _error(line, col, format("variable '{}' already declared in this scope", name))
+    end
+end
+
+def _lookup(name: str, line: i64, col: i64) -> str
+    result := _vars.lookup(name)
+    if result == ""
+        _error(line, col, format("undefined variable '{}'", name))
+        return "???"
+    end
+    return result
+end
+
+# ─── Generic container operations ────────────────────────────────────
+# Returns encoded sig "p1,p2,...|ret" for the given container op and type param.
+# Type codes: L=List[tp], D=Dict[ktp,tp], T=tp, I=i64, S=str, V=void, B=bool
+
+_CONTAINER_SIGS := Dict[str, str]() {
+    "List": "|L",
+    "append": "L,T|V",
+    "get": "L,I|T",
+    "set": "L,I,T|V",
+    "pop": "L|T",
+    "remove": "L,I|V",
+    "Dict": "|D",
+    "put": "D,K,T|V",
+    "lookup": "D,K|T",
+    "has": "D,K|B"
+}
+
+def _mk_list_ty(tp: str) -> str
+    return string.concat("List[", string.concat(tp, "]"))
+end
+
+def _mk_dict_ty(tp: str) -> str
+    return string.concat("Dict[", string.concat(tp, "]"))
+end
+
+def _resolve_type_code(code: str, tp: str) -> str
+    ktp := ""
+    vtp := tp
+    # Depth-aware comma split: only at depth 0
+    parts := tu.split_type_list(tp)
+    if len(parts) > 1
+        ktp = parts[0]
+        vtp = parts[1]
+    end
+    if code == "L"
+        return _mk_list_ty(vtp)
+    end
+    if code == "D"
+        return _mk_dict_ty(tp)
+    end
+    if code == "T"
+        return vtp
+    end
+    if code == "K"
+        return ktp
+    end
+    if code == "I"
+        return "i64"
+    end
+    if code == "S"
+        return "str"
+    end
+    if code == "V"
+        return "void"
+    end
+    if code == "B"
+        return "bool"
+    end
+    return code
+end
+
+def _container_op_sig(name: str, tp: str) -> str
+    if not has(_CONTAINER_SIGS, name)
+        return "|void"
+    end
+    spec := _CONTAINER_SIGS[name]
+    pipe := string.find(spec, "|")
+    param_part := string.substr(spec, 0, pipe)
+    ret_code := string.substr(spec, pipe + 1, len(spec) - pipe - 1)
+    pts: List[str] = List[str]()
+    if len(param_part) > 0
+        codes := strutils.split(param_part, ",")
+        i: i64 = 0
+        while i < len(codes)
+            append(pts, _resolve_type_code(codes[i], tp))
+            i += 1
+        end
+    end
+    return encode_sig(pts, _resolve_type_code(ret_code, tp))
+end
+
+def _is_container_op(name: str) -> bool
+    return has(_CONTAINER_SIGS, name)
+end
+
+# ─── Circular reference detection ───────────────────────────────────
+
+def _extract_class_refs(ty: str, refs: List[str])
+    if has(_class_names, ty)
+        append(refs, ty)
+    elif tu.is_list_type(ty)
+        _extract_class_refs(tu.list_elem_type(ty), refs)
+    elif tu.is_dict_type(ty)
+        _extract_class_refs(tu.dict_key_type(ty), refs)
+        _extract_class_refs(tu.dict_val_type(ty), refs)
+    end
+end
+
+def _check_circular_refs()
+    g := graph.Graph()
+
+    # Register all class nodes
+    i: i64 = 0
+    while i < _prog.child_count()
+        n := _prog.child(i)
+        if n.kind == mp.NodeKind.CLASS_DECL
+            g.add_node(n.value)
+        end
+        i += 1
+    end
+
+    # Build edges from field types (excluding self-references)
+    i = 0
+    while i < _prog.child_count()
+        n := _prog.child(i)
+        if n.kind == mp.NodeKind.CLASS_DECL
+            cls_name := n.value
+            j: i64 = 0
+            while j < n.child_count()
+                ch := n.child(j)
+                if ch.kind == mp.NodeKind.FIELD_DECL
+                    fty := tu.type_node_to_str(ch.child(0))
+                    refs: List[str] = List[str]()
+                    _extract_class_refs(fty, refs)
+                    k: i64 = 0
+                    while k < len(refs)
+                        if refs[k] != cls_name
+                            g.add_edge(cls_name, refs[k])
+                        end
+                        k += 1
+                    end
+                end
+                j += 1
+            end
+        end
+        i += 1
+    end
+
+    cycle := g.find_cycle()
+    if len(cycle) > 0
+        path := strutils.join(cycle, " -> ")
+        _error(1, 1, format("circular class reference detected: {}. Classes cannot reference each other in a cycle, including through List or Dict fields", path))
+    end
+end
+
+def _check_struct_cycles()
+    g := graph.Graph()
+
+    i: i64 = 0
+    while i < _prog.child_count()
+        n := _prog.child(i)
+        if n.kind == mp.NodeKind.STRUCT_DECL
+            g.add_node(n.value)
+        end
+        i += 1
+    end
+
+    i = 0
+    while i < _prog.child_count()
+        n := _prog.child(i)
+        if n.kind == mp.NodeKind.STRUCT_DECL
+            st_name := n.value
+            j: i64 = 0
+            while j < n.child_count()
+                ch := n.child(j)
+                if ch.kind == mp.NodeKind.FIELD_DECL
+                    fty := tu.type_node_to_str(ch.child(0))
+                    if has(_struct_names, fty)
+                        g.add_edge(st_name, fty)
+                    end
+                end
+                j += 1
+            end
+        end
+        i += 1
+    end
+
+    cycle := g.find_cycle()
+    if len(cycle) > 0
+        path := strutils.join(cycle, " -> ")
+        _error(1, 1, format("struct '{}' contains itself (directly or indirectly) - value types cannot be recursive", cycle[0]))
+    end
+end
+
+# ─── Type substitution for monomorphization ──────────────────────────
+
+def _subst_type_name(name: str, tp_name: str, concrete: str) -> str
+    if name == tp_name
+        return concrete
+    end
+    if strutils.starts_with(name, "List[") and strutils.ends_with(name, "]")
+        inner := _subst_type_name(string.substr(name, 5, len(name) - 6), tp_name, concrete)
+        return string.concat("List[", string.concat(inner, "]"))
+    end
+    if strutils.starts_with(name, "Dict[") and strutils.ends_with(name, "]")
+        inner := string.substr(name, 5, len(name) - 6)
+        parts := tu.split_type_list(inner)
+        k_sub := _subst_type_name(parts[0], tp_name, concrete)
+        v_sub := _subst_type_name(parts[1], tp_name, concrete)
+        return format("Dict[{},{}]", k_sub, v_sub)
+    end
+    if tu.is_tuple_type(name)
+        elems := tu.tuple_elem_types(name)
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, "(")
+        i: i64 = 0
+        while i < len(elems)
+            if i > 0
+                stringbuilder.append_str(sb, ",")
+            end
+            stringbuilder.append_str(sb, _subst_type_name(elems[i], tp_name, concrete))
+            i += 1
+        end
+        stringbuilder.append_str(sb, ")")
+        return stringbuilder.build(sb)
+    end
+    return name
+end
+
+# ─── AST deep clone ─────────────────────────────────────────────────
+
+def _clone_node(n: pars.Node) -> pars.Node
+    c := pars.Node(n.kind, n.value, n.line, n.col)
+    c.ty = n.ty
+    c.file = n.file
+    c.doc = n.doc
+    i: i64 = 0
+    while i < n.child_count()
+        c.add_child(_clone_node(n.child(i)))
+        i += 1
+    end
+    return c
+end
+
+# Substitute type params in cloned AST
+def _subst_node(n: pars.Node, tp_name: str, concrete: str)
+    # Substitute type ref nodes
+    if n.kind == mp.NodeKind.TYPE or n.kind == mp.NodeKind.TYPE_LIST or n.kind == mp.NodeKind.TYPE_DICT or n.kind == mp.NodeKind.TYPE_FN
+        n.value = _subst_type_name(n.value, tp_name, concrete)
+    end
+    if n.kind == mp.NodeKind.TYPE_TUPLE
+        # Rebuild value from children after substitution
+        i: i64 = 0
+        while i < n.child_count()
+            _subst_node(n.child(i), tp_name, concrete)
+            i += 1
+        end
+        return
+    end
+    # Substitute type_param on CALL nodes
+    if n.kind == mp.NodeKind.CALL
+        if n.value == tp_name
+            n.value = concrete
+        end
+    end
+    # Substitute LIST_LIT/DICT_LIT elem/val types
+    if n.kind == mp.NodeKind.LIST_LIT
+        if n.value == tp_name
+            n.value = concrete
+        end
+    end
+    if n.kind == mp.NodeKind.DICT_LIT
+        if n.value == tp_name
+            n.value = concrete
+        end
+    end
+    # Recurse into children
+    i: i64 = 0
+    while i < n.child_count()
+        _subst_node(n.child(i), tp_name, concrete)
+        i += 1
+    end
+end
+
+# ─── Check functions and methods ─────────────────────────────────────
+
+def _check_func(f: pars.Node)
+    _vars.enter_scope()
+    old_ret := _cur_ret
+    old_loop := _loop_depth
+    _cur_ret = tu.func_ret_type_str(f)
+    _loop_depth = 0
+
+    # Declare params
+    params := tu.func_params_block(f)
+    i: i64 = 0
+    while i < params.child_count()
+        p := params.child(i)
+        pname := p.value
+        pty := tu.type_node_to_str(p.child(0))
+        _declare(pname, pty, p.line, p.col, False)
+        i += 1
+    end
+
+    # Check body
+    body := tu.func_body(f)
+    _check_block(body)
+
+    _cur_ret = old_ret
+    _loop_depth = old_loop
+    _vars.leave_scope()
+end
+
+def _check_type_method(type_name: str, m: pars.Node, is_struct: bool)
+    _vars.enter_scope()
+    old_ret := _cur_ret
+    old_class := _cur_class
+    old_struct := _cur_struct
+    old_loop := _loop_depth
+    ret_ty := tu.func_ret_type_str(m)
+    if ret_ty == "Self"
+        ret_ty = type_name
+    end
+    _cur_ret = ret_ty
+    if is_struct
+        _cur_struct = type_name
+    else
+        _cur_class = type_name
+    end
+    _loop_depth = 0
+
+    params := tu.func_params_block(m)
+    _declare("self", type_name, m.line, m.col, False)
+    i: i64 = 1
+    while i < params.child_count()
+        p := params.child(i)
+        pname := p.value
+        pty := tu.type_node_to_str(p.child(0))
+        if pty == "Self"
+            pty = type_name
+        end
+        _declare(pname, pty, p.line, p.col, False)
+        i += 1
+    end
+
+    body := tu.func_body(m)
+    _check_block(body)
+
+    _cur_class = old_class
+    _cur_struct = old_struct
+    _cur_ret = old_ret
+    _loop_depth = old_loop
+    _vars.leave_scope()
+end
+
+def _check_block(block: pars.Node)
+    i: i64 = 0
+    while i < block.child_count()
+        _check_stmt(block.child(i))
+        i += 1
+    end
+end
+
+# ─── Statement checking ─────────────────────────────────────────────
+
+def _check_stmt(st: pars.Node)
+    if _had_error
+        return
+    end
+    k := st.kind
+
+    # --- VAR_DECL / CONST_DECL / STATIC_DECL ---
+    if k == mp.NodeKind.VAR_DECL or k == mp.NodeKind.CONST_DECL or k == mp.NodeKind.STATIC_DECL
+        is_const := k == mp.NodeKind.CONST_DECL
+        is_static := k == mp.NodeKind.STATIC_DECL
+        name := st.value
+
+        if st.child_count() == 1
+            # Walrus (:=) -- infer type from RHS
+            val_ty := _check_expr(st.child(0), "")
+            if val_ty == "none"
+                _error_at(st, "cannot infer type from 'None' in := declaration")
+                return
+            end
+            if val_ty == "void"
+                _error_at(st, "cannot infer type from void expression in := declaration")
+                return
+            end
+            # Set the inferred type on the node for later use
+            st.ty = val_ty
+            if is_static and _cur_ret == ""
+                _error_at(st, "'static' variables are only allowed inside functions")
+                return
+            end
+            _declare(name, val_ty, st.line, st.col, is_const)
+        else
+            # Typed declaration: child(0) = type, child(1) = value expr
+            decl_ty := tu.type_node_to_str(st.child(0))
+            _require_known(st.line, st.col, decl_ty)
+            val_ty := _check_expr(st.child(1), decl_ty)
+            if not _assignable(val_ty, decl_ty)
+                _error_at(st, format("cannot assign value of type {} to variable '{}' of type {}", val_ty, name, decl_ty))
+                return
+            end
+            st.ty = decl_ty
+            if is_static and _cur_ret == ""
+                _error_at(st, "'static' variables are only allowed inside functions")
+                return
+            end
+            _declare(name, decl_ty, st.line, st.col, is_const)
+        end
+        return
+    end
+
+    # --- ASSIGN ---
+    if k == mp.NodeKind.ASSIGN
+        op := st.value
+        name := st.child(0).value
+        encoded := _lookup(name, st.line, st.col)
+        if encoded == "???"
+            return
+        end
+        vi_ty := _var_ty(encoded)
+        if _var_is_const(encoded)
+            _error_at(st, format("cannot assign to constant '{}'", name))
+            return
+        end
+        rhs_ty := _check_expr(st.child(1), vi_ty)
+
+        if op == "="
+            if not _assignable(rhs_ty, vi_ty)
+                _error_at(st, format("cannot assign {} to '{}' of type {}", rhs_ty, name, vi_ty))
+            end
+            return
+        end
+
+        if op == "+=" or op == "-=" or op == "*=" or op == "/=" or op == "%="
+            if op == "+=" and vi_ty == "str"
+                if rhs_ty != "str"
+                    _error_at(st, format("cannot apply '{}' with str and {}", op, rhs_ty))
+                end
+                return
+            end
+            if not has(_NUM_TYPES, vi_ty)
+                _error_at(st, format("compound assignment '{}' only allowed on numeric types, got {}", op, vi_ty))
+                return
+            end
+            if rhs_ty != vi_ty
+                _error_at(st, format("cannot apply '{}' with {} and {}", op, vi_ty, rhs_ty))
+            end
+            return
+        end
+
+        if op == "&=" or op == "|=" or op == "^=" or op == "<<=" or op == ">>="
+            if not has(_INT_TYPES, vi_ty)
+                _error_at(st, format("compound assignment '{}' only allowed on integer types, got {}", op, vi_ty))
+                return
+            end
+            if rhs_ty != vi_ty
+                _error_at(st, format("cannot apply '{}' with {} and {}", op, vi_ty, rhs_ty))
+            end
+            return
+        end
+
+        _error_at(st, format("unknown assignment operator '{}'", op))
+        return
+    end
+
+    # --- MEMBER_ASSIGN ---
+    if k == mp.NodeKind.MEMBER_ASSIGN
+        op := st.value
+        mem_node := st.child(0)
+        rhs_node := st.child(1)
+        member := mem_node.value
+        obj_ty := _check_expr(mem_node.child(0), "")
+
+        if has(_iface_names, obj_ty)
+            _error_at(st, format("cannot assign fields on interface type '{}'", obj_ty))
+            return
+        end
+
+        field_ty := ""
+
+        if has(_struct_names, obj_ty)
+            si := _structs[obj_ty]
+            if not has(si.field_types, member)
+                _error_at(st, format("struct '{}' has no field '{}'", obj_ty, member))
+                return
+            end
+            field_ty = si.field_types[member]
+        elif has(_class_names, obj_ty)
+            ci := _classes[obj_ty]
+            if not has(ci.field_types, member)
+                _error_at(st, format("class '{}' has no field '{}'", obj_ty, member))
+                return
+            end
+            field_ty = ci.field_types[member]
+        else
+            _error_at(st, format("member assignment on non-class type '{}'", obj_ty))
+            return
+        end
+
+        rhs_ty := _check_expr(rhs_node, field_ty)
+        if op == "="
+            if not _assignable(rhs_ty, field_ty)
+                _error_at(st, format("cannot assign {} to field '{}' of type {}", rhs_ty, member, field_ty))
+            end
+            return
+        end
+        if op == "+=" or op == "-=" or op == "*=" or op == "/=" or op == "%="
+            if not has(_NUM_TYPES, field_ty)
+                _error_at(st, format("compound assignment '{}' on field only allowed on numeric types, got {}", op, field_ty))
+                return
+            end
+            if rhs_ty != field_ty
+                _error_at(st, format("cannot apply '{}' with {} and {}", op, field_ty, rhs_ty))
+            end
+            return
+        end
+        if op == "&=" or op == "|=" or op == "^=" or op == "<<=" or op == ">>="
+            if not has(_INT_TYPES, field_ty)
+                _error_at(st, format("compound assignment '{}' on field only allowed on integer types, got {}", op, field_ty))
+                return
+            end
+            if rhs_ty != field_ty
+                _error_at(st, format("cannot apply '{}' with {} and {}", op, field_ty, rhs_ty))
+            end
+            return
+        end
+        _error_at(st, format("unknown assignment operator '{}'", op))
+        return
+    end
+
+    # --- INDEX_ASSIGN ---
+    if k == mp.NodeKind.INDEX_ASSIGN
+        op := st.value
+        obj_ty := _check_expr(st.child(0), "")
+        idx_ty := _check_expr(st.child(1), "")
+
+        if tu.is_list_type(obj_ty)
+            if idx_ty != "i64"
+                _error_at(st, format("list index must be i64, got {}", idx_ty))
+                return
+            end
+            elem := tu.list_elem_type(obj_ty)
+            rhs_ty := _check_expr(st.child(2), elem)
+            if op != "="
+                _error_at(st, "only '=' assignment supported for list subscript")
+                return
+            end
+            if not _assignable(rhs_ty, elem)
+                _error_at(st, format("cannot assign {} to list element of type {}", rhs_ty, elem))
+            end
+            return
+        end
+        if tu.is_dict_type(obj_ty)
+            kty := tu.dict_key_type(obj_ty)
+            if idx_ty != kty
+                _error_at(st, format("dict key must be {}, got {}", kty, idx_ty))
+                return
+            end
+            val := tu.dict_val_type(obj_ty)
+            rhs_ty := _check_expr(st.child(2), val)
+            if op != "="
+                _error_at(st, "only '=' assignment supported for dict subscript")
+                return
+            end
+            if not _assignable(rhs_ty, val)
+                _error_at(st, format("cannot assign {} to dict value of type {}", rhs_ty, val))
+            end
+            return
+        end
+        rhs_ty := _check_expr(st.child(2), "")
+        _error_at(st, format("type '{}' does not support subscript assignment []", obj_ty))
+        return
+    end
+
+    # --- EXPR_STMT ---
+    if k == mp.NodeKind.EXPR_STMT
+        _check_expr(st.child(0), "")
+        return
+    end
+
+    # --- RETURN ---
+    if k == mp.NodeKind.RETURN
+        if _cur_ret == ""
+            _error_at(st, "return not allowed at top level")
+            return
+        end
+        if st.child_count() == 0
+            if _cur_ret != "void"
+                _error_at(st, format("return requires a value of type {}", _cur_ret))
+            end
+            return
+        end
+        if _cur_ret == "void"
+            _error_at(st, "void function must not return a value")
+            return
+        end
+        vty := _check_expr(st.child(0), _cur_ret)
+        if not _assignable(vty, _cur_ret)
+            _error_at(st, format("return type mismatch: expected {}, got {}", _cur_ret, vty))
+        end
+        return
+    end
+
+    # --- BREAK ---
+    if k == mp.NodeKind.BREAK
+        if _loop_depth <= 0
+            _error_at(st, "break not inside loop")
+        end
+        return
+    end
+
+    # --- CONTINUE ---
+    if k == mp.NodeKind.CONTINUE
+        if _loop_depth <= 0
+            _error_at(st, "continue not inside loop")
+        end
+        return
+    end
+
+    # --- WHILE ---
+    if k == mp.NodeKind.WHILE
+        cty := _check_expr(st.child(0), "")
+        if not _is_truthy_type(cty)
+            _error_at(st, format("while condition requires bool, integer, or reference type, got {}", cty))
+        end
+        _loop_depth += 1
+        _vars.enter_scope()
+        _check_block(st.child(1))
+        _vars.leave_scope()
+        _loop_depth -= 1
+        return
+    end
+
+    # --- FOR ---
+    if k == mp.NodeKind.FOR
+        var_name := st.value
+        var_ty := tu.type_node_to_str(st.child(0))
+        _require_known(st.line, st.col, var_ty)
+        iter_ty := _check_expr(st.child(1), "")
+        if not tu.is_list_type(iter_ty)
+            _error_at(st, format("for-in requires a list type, got {}", iter_ty))
+            return
+        end
+        elem_ty := tu.list_elem_type(iter_ty)
+        if var_ty != elem_ty
+            _error_at(st, format("loop variable type '{}' does not match list element type '{}'", var_ty, elem_ty))
+        end
+        _loop_depth += 1
+        _vars.enter_scope()
+        _declare(var_name, elem_ty, st.line, st.col, False)
+        _check_block(st.child(2))
+        _vars.leave_scope()
+        _loop_depth -= 1
+        return
+    end
+
+    # --- IF ---
+    if k == mp.NodeKind.IF
+        i: i64 = 0
+        while i < st.child_count()
+            arm := st.child(i)
+            if arm.value == "else"
+                _vars.enter_scope()
+                _check_block(arm.child(0))
+                _vars.leave_scope()
+            else
+                cty := _check_expr(arm.child(0), "")
+                if not _is_truthy_type(cty)
+                    _error_at(arm, format("if/elif condition requires bool, integer, or reference type, got {}", cty))
+                end
+                _vars.enter_scope()
+                _check_block(arm.child(1))
+                _vars.leave_scope()
+            end
+            i += 1
+        end
+        return
+    end
+
+    # --- BLOCK ---
+    if k == mp.NodeKind.BLOCK
+        _vars.enter_scope()
+        _check_block(st)
+        _vars.leave_scope()
+        return
+    end
+
+    # --- TUPLE_DESTRUCT ---
+    if k == mp.NodeKind.TUPLE_DESTRUCT
+        # Last child is the value expression, rest are IDENT names
+        val_idx := st.child_count() - 1
+        val_ty := _check_expr(st.child(val_idx), "")
+        if not tu.is_tuple_type(val_ty)
+            _error_at(st, format("cannot destructure non-tuple type '{}'", val_ty))
+            return
+        end
+        elem_tys := tu.tuple_elem_types(val_ty)
+        name_count := val_idx
+        if len(elem_tys) != name_count
+            _error_at(st, format("tuple has {} elements, but {} names given", len(elem_tys), name_count))
+            return
+        end
+        i: i64 = 0
+        while i < name_count
+            _declare(st.child(i).value, elem_tys[i], st.line, st.col, False)
+            i += 1
+        end
+        return
+    end
+end
+
+# ─── Expression checking ────────────────────────────────────────────
+# Returns the resolved type string and sets node.ty
+
+def _check_expr(e: pars.Node, target_ty: str) -> str
+    if _had_error
+        return "???"
+    end
+    k := e.kind
+
+    # --- INT_LIT ---
+    if k == mp.NodeKind.INT_LIT
+        if has(_INT_TYPES, target_ty)
+            e.ty = target_ty
+            return target_ty
+        end
+        e.ty = "i64"
+        return "i64"
+    end
+
+    # --- FLOAT_LIT ---
+    if k == mp.NodeKind.FLOAT_LIT
+        if has(_FLOAT_TYPES, target_ty)
+            e.ty = target_ty
+            return target_ty
+        end
+        e.ty = "f64"
+        return "f64"
+    end
+
+    # --- BOOL_LIT ---
+    if k == mp.NodeKind.BOOL_LIT
+        e.ty = "bool"
+        return "bool"
+    end
+
+    # --- STRING_LIT ---
+    if k == mp.NodeKind.STRING_LIT
+        e.ty = "str"
+        return "str"
+    end
+
+    # --- CHAR_LIT ---
+    if k == mp.NodeKind.CHAR_LIT
+        if has(_INT_TYPES, target_ty)
+            e.ty = target_ty
+            return target_ty
+        end
+        e.ty = "i64"
+        return "i64"
+    end
+
+    # --- NONE_LIT ---
+    if k == mp.NodeKind.NONE_LIT
+        e.ty = "none"
+        return "none"
+    end
+
+    # --- IDENT ---
+    if k == mp.NodeKind.IDENT
+        name := e.value
+        # Function pointer: var with Fn type or function name used as value
+        if target_ty != "" and tu.is_fn_type(target_ty) and has(_funcs, name)
+            sig := _funcs[name]
+            ptys := tu.sig_params(sig)
+            rty := tu.sig_ret(sig)
+            fn_ty := _build_fn_type(ptys, rty)
+            if fn_ty != target_ty
+                _error_at(e, format("function '{}' has type {}, expected {}", name, fn_ty, target_ty))
+            end
+            e.ty = fn_ty
+            return fn_ty
+        end
+        encoded := _lookup(name, e.line, e.col)
+        if encoded == "???"
+            e.ty = "???"
+            return "???"
+        end
+        ty := _var_ty(encoded)
+        e.ty = ty
+        return ty
+    end
+
+    # --- UNARY ---
+    if k == mp.NodeKind.UNARY
+        op := e.value
+        rhs_ty := _check_expr(e.child(0), target_ty)
+        if op == "-"
+            if not has(_NUM_TYPES, _resolve_enum_ty(rhs_ty))
+                _error_at(e, format("unary '-' requires numeric, got {}", rhs_ty))
+            end
+            e.ty = rhs_ty
+            return rhs_ty
+        end
+        if op == "not"
+            if not _is_truthy_type(rhs_ty)
+                _error_at(e, format("'not' requires bool, integer, or reference type, got {}", rhs_ty))
+            end
+            e.ty = "bool"
+            return "bool"
+        end
+        if op == "~"
+            if not has(_INT_TYPES, _resolve_enum_ty(rhs_ty))
+                _error_at(e, format("unary '~' requires integer, got {}", rhs_ty))
+            end
+            e.ty = rhs_ty
+            return rhs_ty
+        end
+        _error_at(e, format("unknown unary operator '{}'", op))
+        e.ty = "???"
+        return "???"
+    end
+
+    # --- IS ---
+    if k == mp.NodeKind.IS
+        lhs_ty := _check_expr(e.child(0), "")
+        rhs := e.value
+        if rhs == "None"
+            e.ty = "bool"
+            return "bool"
+        end
+        if not _is_known(rhs)
+            _error_at(e, format("'is' right-hand side must be a type name, got '{}'", rhs))
+        end
+        e.ty = "bool"
+        return "bool"
+    end
+
+    # --- AS ---
+    if k == mp.NodeKind.AS
+        lhs_ty := _check_expr(e.child(0), "")
+        target := e.value
+        if not _is_known(target)
+            _error_at(e, format("'as' target must be a type name, got '{}'", target))
+            e.ty = target
+            return target
+        end
+        if not has(_iface_names, lhs_ty)
+            _error_at(e, format("'as' requires an interface type on the left, got '{}'", lhs_ty))
+            e.ty = target
+            return target
+        end
+        if not has(_class_names, target)
+            _error_at(e, format("'as' target must be a class type, got '{}'", target))
+            e.ty = target
+            return target
+        end
+        if not has(_class_implements, target)
+            _error_at(e, format("class '{}' does not implement interface '{}'", target, lhs_ty))
+        else
+            ifaces := _class_implements[target]
+            parts := strutils.split(ifaces, ",")
+            found := False
+            i: i64 = 0
+            while i < len(parts)
+                if parts[i] == lhs_ty
+                    found = True
+                end
+                i += 1
+            end
+            if not found
+                _error_at(e, format("class '{}' does not implement interface '{}'", target, lhs_ty))
+            end
+        end
+        e.ty = target
+        return target
+    end
+
+    # --- BINARY ---
+    if k == mp.NodeKind.BINARY
+        return _check_binary(e, target_ty)
+    end
+
+    # --- CALL ---
+    if k == mp.NodeKind.CALL
+        return _check_call(e, target_ty)
+    end
+
+    # --- MEMBER ---
+    if k == mp.NodeKind.MEMBER
+        member := e.value
+        obj_node := e.child(0)
+        # Enum variant: EnumName.VARIANT
+        if obj_node.kind == mp.NodeKind.IDENT and has(_enum_names, obj_node.value)
+            enum_name := obj_node.value
+            if not has(_enum_variants, enum_name)
+                _error_at(e, format("enum '{}' has no variants", enum_name))
+                e.ty = enum_name
+                return enum_name
+            end
+            variants := _enum_variants[enum_name]
+            if not has(variants, member)
+                _error_at(e, format("enum '{}' has no variant '{}'", enum_name, member))
+            end
+            e.ty = enum_name
+            return enum_name
+        end
+        obj_ty := _check_expr(obj_node, "")
+        if has(_iface_names, obj_ty)
+            _error_at(e, format("cannot access fields on interface type '{}'", obj_ty))
+            e.ty = "???"
+            return "???"
+        end
+        if has(_struct_names, obj_ty)
+            si := _structs[obj_ty]
+            if not has(si.field_types, member)
+                _error_at(e, format("struct '{}' has no field '{}'", obj_ty, member))
+                e.ty = "???"
+                return "???"
+            end
+            ty := si.field_types[member]
+            e.ty = ty
+            return ty
+        end
+        if not has(_class_names, obj_ty)
+            _error_at(e, format("member access on non-class type '{}'", obj_ty))
+            e.ty = "???"
+            return "???"
+        end
+        ci := _classes[obj_ty]
+        if not has(ci.field_types, member)
+            _error_at(e, format("class '{}' has no field '{}'", obj_ty, member))
+            e.ty = "???"
+            return "???"
+        end
+        ty := ci.field_types[member]
+        e.ty = ty
+        return ty
+    end
+
+    # --- INDEX ---
+    if k == mp.NodeKind.INDEX
+        obj_ty := _check_expr(e.child(0), "")
+        idx_ty := _check_expr(e.child(1), "")
+        if tu.is_list_type(obj_ty)
+            if idx_ty != "i64"
+                _error_at(e, format("list index must be i64, got {}", idx_ty))
+            end
+            elem := tu.list_elem_type(obj_ty)
+            e.ty = elem
+            return elem
+        end
+        if tu.is_dict_type(obj_ty)
+            kty := tu.dict_key_type(obj_ty)
+            if idx_ty != kty
+                _error_at(e, format("dict key must be {}, got {}", kty, idx_ty))
+            end
+            val := tu.dict_val_type(obj_ty)
+            e.ty = val
+            return val
+        end
+        if obj_ty == "str"
+            if idx_ty != "i64"
+                _error_at(e, format("string index must be i64, got {}", idx_ty))
+            end
+            e.ty = "i64"
+            return "i64"
+        end
+        _error_at(e, format("type '{}' does not support subscript []", obj_ty))
+        e.ty = "???"
+        return "???"
+    end
+
+    # --- TUPLE_EXPR ---
+    if k == mp.NodeKind.TUPLE_EXPR
+        target_elems: List[str] = List[str]()
+        has_target := False
+        if target_ty != "" and tu.is_tuple_type(target_ty)
+            target_elems = tu.tuple_elem_types(target_ty)
+            if len(target_elems) != e.child_count()
+                _error_at(e, format("tuple has {} elements, target type expects {}", e.child_count(), len(target_elems)))
+            else
+                has_target = True
+            end
+        end
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, "(")
+        i: i64 = 0
+        while i < e.child_count()
+            elem_target := ""
+            if has_target
+                elem_target = target_elems[i]
+            end
+            ety := _check_expr(e.child(i), elem_target)
+            if has_target
+                if not _assignable(ety, target_elems[i])
+                    _error_at(e.child(i), format("tuple element {} has type {}, expected {}", i, ety, target_elems[i]))
+                end
+            end
+            if i > 0
+                stringbuilder.append_str(sb, ",")
+            end
+            stringbuilder.append_str(sb, ety)
+            i += 1
+        end
+        stringbuilder.append_str(sb, ")")
+        result_ty := ""
+        if has_target
+            result_ty = target_ty
+        else
+            result_ty = stringbuilder.build(sb)
+        end
+        e.ty = result_ty
+        return result_ty
+    end
+
+    # --- LIST_LIT ---
+    if k == mp.NodeKind.LIST_LIT
+        tp := e.value
+        if not _is_known(tp)
+            _error_at(e, format("unknown type parameter '{}' in List[{}]", tp, tp))
+        end
+        i: i64 = 0
+        while i < e.child_count()
+            ety := _check_expr(e.child(i), tp)
+            if not _assignable(ety, tp)
+                _error_at(e.child(i), format("list literal element {} has type {}, expected {}", i + 1, ety, tp))
+            end
+            i += 1
+        end
+        result := string.concat("List[", string.concat(tp, "]"))
+        e.ty = result
+        return result
+    end
+
+    # --- DICT_LIT ---
+    if k == mp.NodeKind.DICT_LIT
+        tp := e.value
+        parts := tu.split_type_list(tp)
+        ktp := parts[0]
+        vtp := parts[1]
+        if not _is_known(ktp)
+            _error_at(e, format("unknown key type '{}' in Dict[{}]", ktp, tp))
+        end
+        if not _is_known(vtp)
+            _error_at(e, format("unknown value type '{}' in Dict[{}]", vtp, tp))
+        end
+        # Children: key0, val0, key1, val1, ...
+        i: i64 = 0
+        while i < e.child_count()
+            kty := _check_expr(e.child(i), ktp)
+            if kty != ktp
+                _error_at(e.child(i), format("dict literal key must be {}, got {}", ktp, kty))
+            end
+            vty := _check_expr(e.child(i + 1), vtp)
+            if not _assignable(vty, vtp)
+                _error_at(e.child(i + 1), format("dict literal value has type {}, expected {}", vty, vtp))
+            end
+            i += 2
+        end
+        result := format("Dict[{}]", tp)
+        e.ty = result
+        return result
+    end
+
+    _error_at(e, format("unhandled expression kind {}", e.kind))
+    e.ty = "???"
+    return "???"
+end
+
+# ─── Binary expression checking ─────────────────────────────────────
+
+def _check_binary(e: pars.Node, target_ty: str) -> str
+    op := e.value
+    lhs := e.child(0)
+    rhs := e.child(1)
+
+    a := _check_expr(lhs, "")
+
+    # Let integer/float literals adapt to the other operand's type
+    rhs_hint := ""
+    if has(_INT_TYPES, a) and (rhs.kind == mp.NodeKind.INT_LIT or rhs.kind == mp.NodeKind.CHAR_LIT)
+        rhs_hint = a
+    elif has(_FLOAT_TYPES, a) and rhs.kind == mp.NodeKind.FLOAT_LIT
+        rhs_hint = a
+    end
+    b := _check_expr(rhs, rhs_hint)
+
+    # Symmetric: if RHS resolved first and LHS is a literal, re-check LHS
+    if has(_INT_TYPES, b) and a == "i64" and (lhs.kind == mp.NodeKind.INT_LIT or lhs.kind == mp.NodeKind.CHAR_LIT) and b != "i64"
+        a = _check_expr(lhs, b)
+    elif has(_FLOAT_TYPES, b) and a == "f64" and lhs.kind == mp.NodeKind.FLOAT_LIT and b != "f64"
+        a = _check_expr(lhs, b)
+    end
+
+    ra := _resolve_enum_ty(a)
+    rb := _resolve_enum_ty(b)
+
+    if op == "+" or op == "-" or op == "*" or op == "/" or op == "%"
+        if op == "+" and a == "str" and b == "str"
+            e.ty = "str"
+            return "str"
+        end
+        if not has(_NUM_TYPES, ra) or not has(_NUM_TYPES, rb)
+            _error_at(e, format("operator '{}' requires numeric operands, got {} and {}", op, a, b))
+            e.ty = a
+            return a
+        end
+        if ra != rb
+            _error_at(e, format("operator '{}' requires same numeric type, got {} and {}", op, a, b))
+        end
+        e.ty = a
+        return a
+    end
+
+    if op == "&" or op == "|" or op == "^" or op == "<<" or op == ">>"
+        if not has(_INT_TYPES, ra) or not has(_INT_TYPES, rb)
+            _error_at(e, format("operator '{}' requires integer operands, got {} and {}", op, a, b))
+            e.ty = a
+            return a
+        end
+        if ra != rb
+            _error_at(e, format("operator '{}' requires same integer type, got {} and {}", op, a, b))
+        end
+        e.ty = a
+        return a
+    end
+
+    if op == "<" or op == "<=" or op == ">" or op == ">="
+        if not has(_NUM_TYPES, ra) or not has(_NUM_TYPES, rb)
+            _error_at(e, format("comparison '{}' requires numeric operands, got {} and {}", op, a, b))
+        elif ra != rb
+            _error_at(e, format("comparison '{}' requires same numeric type, got {} and {}", op, a, b))
+        end
+        e.ty = "bool"
+        return "bool"
+    end
+
+    if op == "==" or op == "!="
+        if a == "none" and _is_ref_type(b)
+            e.ty = "bool"
+            return "bool"
+        end
+        if b == "none" and _is_ref_type(a)
+            e.ty = "bool"
+            return "bool"
+        end
+        if ra != rb
+            _error_at(e, format("equality '{}' requires same types, got {} and {}", op, a, b))
+        end
+        e.ty = "bool"
+        return "bool"
+    end
+
+    if op == "and" or op == "or"
+        if not _is_truthy_type(a) or not _is_truthy_type(b)
+            _error_at(e, format("'{}' requires bool, integer, or reference type operands, got {} and {}", op, a, b))
+        end
+        e.ty = "bool"
+        return "bool"
+    end
+
+    _error_at(e, format("unknown binary operator '{}'", op))
+    e.ty = "???"
+    return "???"
+end
+
+# ─── Call expression checking ────────────────────────────────────────
+
+def _build_fn_type(params: List[str], ret: str) -> str
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "Fn(")
+    i: i64 = 0
+    while i < len(params)
+        if i > 0
+            stringbuilder.append_str(sb, ",")
+        end
+        stringbuilder.append_str(sb, params[i])
+        i += 1
+    end
+    stringbuilder.append_str(sb, ")->")
+    stringbuilder.append_str(sb, ret)
+    return stringbuilder.build(sb)
+end
+
+def _check_call(e: pars.Node, target_ty: str) -> str
+    callee := e.child(0)
+    type_param := e.value
+    nargs := e.child_count() - 1
+
+    # Method call: obj.method(args)
+    if callee.kind == mp.NodeKind.MEMBER
+        return _check_method_call(e, callee, target_ty)
+    end
+
+    # Expression-based function pointer call (non-ident callee)
+    if callee.kind != mp.NodeKind.IDENT
+        callee_ty := _check_expr(callee, "")
+        if tu.is_fn_type(callee_ty)
+            return _check_fn_ptr_call(e, callee_ty)
+        end
+        _error_at(e, "callee must be identifier")
+        e.ty = "???"
+        return "???"
+    end
+
+    name := callee.value
+
+    # Check if it's a variable with Fn type (function pointer call)
+    if not has(_funcs, name) and not tu.is_cast_type(name) and not _is_builtin(name) and not _is_container_op(name) and not has(_class_names, name) and not has(_iface_names, name) and not has(_generic_funcs, name)
+        encoded := _vars.lookup(name)
+        if encoded != ""
+            vi_ty := _var_ty(encoded)
+            if tu.is_fn_type(vi_ty)
+                return _check_fn_ptr_call(e, vi_ty)
+            end
+        end
+    end
+
+    # Cast builtins: i8(x), i16(x), ... f64(x)
+    if tu.is_cast_type(name)
+        if nargs != 1
+            _error_at(e, format("{}() expects 1 argument", name))
+            e.ty = name
+            return name
+        end
+        aty := _check_expr(e.child(1), "")
+        raty := _resolve_enum_ty(aty)
+        if not has(_NUM_TYPES, raty)
+            _error_at(e, format("{}() requires a numeric argument, got {}", name, aty))
+        end
+        e.ty = name
+        return name
+    end
+
+    # print(x)
+    if name == "print"
+        if nargs != 1
+            _error_at(e, "print(x) expects 1 argument")
+            e.ty = "void"
+            return "void"
+        end
+        aty := _check_expr(e.child(1), "")
+        raty := _resolve_enum_ty(aty)
+        if not has(_NUM_TYPES, raty) and raty != "bool" and raty != "str"
+            _error_at(e, format("print() does not support type {}", aty))
+        end
+        e.ty = "void"
+        return "void"
+    end
+
+    # format(fmt, args...)
+    if name == "format"
+        if nargs < 1
+            _error_at(e, "format() expects at least 1 argument (the format string)")
+            e.ty = "str"
+            return "str"
+        end
+        fmt_ty := _check_expr(e.child(1), "str")
+        if fmt_ty != "str"
+            _error_at(e.child(1), format("format() first argument must be str, got {}", fmt_ty))
+        end
+        i: i64 = 2
+        while i <= nargs
+            aty := _check_expr(e.child(i), "")
+            raty := _resolve_enum_ty(aty)
+            if not has(_NUM_TYPES, raty) and raty != "bool" and raty != "str"
+                _error_at(e.child(i), format("format() argument {} has unsupported type {}", i, aty))
+            end
+            i += 1
+        end
+        e.ty = "str"
+        return "str"
+    end
+
+    # range(1-3 args)
+    if name == "range"
+        if nargs < 1 or nargs > 3
+            _error_at(e, format("range() expects 1-3 arguments, got {}", nargs))
+            e.ty = "List[i64]"
+            return "List[i64]"
+        end
+        i: i64 = 1
+        while i <= nargs
+            at := _check_expr(e.child(i), "i64")
+            if at != "i64"
+                _error_at(e.child(i), format("argument {} of 'range' must be i64, got {}", i, at))
+            end
+            i += 1
+        end
+        e.ty = "List[i64]"
+        return "List[i64]"
+    end
+
+    # keys(d)
+    if name == "keys"
+        if nargs != 1
+            _error_at(e, "keys() expects 1 argument")
+            e.ty = "List[str]"
+            return "List[str]"
+        end
+        at := _check_expr(e.child(1), "")
+        if not tu.is_dict_type(at)
+            _error_at(e, format("keys() requires a dict type, got {}", at))
+        end
+        kty := tu.dict_key_type(at)
+        ret := format("List[{}]", kty)
+        e.ty = ret
+        return ret
+    end
+
+    # len(x)
+    if name == "len"
+        if nargs != 1
+            _error_at(e, "len() expects 1 argument")
+            e.ty = "i64"
+            return "i64"
+        end
+        at := _check_expr(e.child(1), "")
+        if not tu.is_list_type(at) and not tu.is_dict_type(at) and at != "str"
+            _error_at(e, format("len() does not support type {}", at))
+        end
+        e.ty = "i64"
+        return "i64"
+    end
+
+    # Generic container ops with explicit type param: name[T](...)
+    if type_param != "" and _is_container_op(name)
+        # type_param may be composite "K,V" for dict ops
+        tp_parts := tu.split_type_list(type_param)
+        pi: i64 = 0
+        while pi < len(tp_parts)
+            if not _is_known(tp_parts[pi])
+                _error_at(e, format("unknown type parameter '{}' in '{}[{}]'", tp_parts[pi], name, type_param))
+            end
+            pi += 1
+        end
+        sig := _container_op_sig(name, type_param)
+        ptys := tu.sig_params(sig)
+        rty := tu.sig_ret(sig)
+        if len(ptys) != nargs
+            _error_at(e, format("'{}[{}]' expects {} args, got {}", name, type_param, len(ptys), nargs))
+            e.ty = rty
+            return rty
+        end
+        i: i64 = 0
+        while i < nargs
+            at := _check_expr(e.child(i + 1), ptys[i])
+            if not _assignable(at, ptys[i])
+                _error_at(e.child(i + 1), format("argument {} of '{}[{}]' expected {}, got {}", i + 1, name, type_param, ptys[i], at))
+            end
+            i += 1
+        end
+        e.ty = rty
+        return rty
+    end
+
+    # Generic container ops with inference (no explicit type param)
+    if type_param == "" and _is_container_op(name) and name != "List" and name != "Dict" and nargs > 0
+        first_ty := _check_expr(e.child(1), "")
+        inferred := ""
+        if tu.is_list_type(first_ty)
+            inferred = tu.list_elem_type(first_ty)
+        elif tu.is_dict_type(first_ty)
+            inferred = tu.dict_inner(first_ty)
+        end
+        if inferred != ""
+            e.value = inferred
+            sig := _container_op_sig(name, inferred)
+            ptys := tu.sig_params(sig)
+            rty := tu.sig_ret(sig)
+            if len(ptys) != nargs
+                _error_at(e, format("'{}' expects {} args, got {}", name, len(ptys), nargs))
+                e.ty = rty
+                return rty
+            end
+            i: i64 = 1
+            while i < nargs
+                at := _check_expr(e.child(i + 1), ptys[i])
+                if not _assignable(at, ptys[i])
+                    _error_at(e.child(i + 1), format("argument {} of '{}' expected {}, got {}", i + 1, name, ptys[i], at))
+                end
+                i += 1
+            end
+            e.ty = rty
+            return rty
+        end
+    end
+
+    # Interface cannot be constructed
+    if has(_iface_names, name)
+        _error_at(e, format("cannot construct interface '{}' - only classes can be instantiated", name))
+        e.ty = name
+        return name
+    end
+
+    # Constructor: ClassName(args)
+    if has(_class_names, name)
+        ci := _classes[name]
+        if len(ci.init_param_types) != nargs
+            _error_at(e, format("constructor '{}' expects {} args, got {}", name, len(ci.init_param_types), nargs))
+            e.ty = name
+            return name
+        end
+        i: i64 = 0
+        while i < nargs
+            pt := ci.init_param_types[i]
+            at := _check_expr(e.child(i + 1), pt)
+            if not _assignable(at, pt)
+                _error_at(e.child(i + 1), format("argument {} of constructor '{}' expected {}, got {}", i + 1, name, pt, at))
+            end
+            i += 1
+        end
+        e.ty = name
+        return name
+    end
+
+    # Struct construction: StructName(field1, field2, ...)
+    if has(_struct_names, name)
+        si := _structs[name]
+        expected := len(si.field_order)
+        if expected != nargs
+            _error_at(e, format("struct '{}' has {} fields, got {} arguments", name, expected, nargs))
+            e.ty = name
+            return name
+        end
+        i: i64 = 0
+        while i < nargs
+            fname := si.field_order[i]
+            fty := si.field_types[fname]
+            at := _check_expr(e.child(i + 1), fty)
+            if not _assignable(at, fty)
+                _error_at(e.child(i + 1), format("field '{}' of struct '{}' expected {}, got {}", fname, name, fty, at))
+            end
+            i += 1
+        end
+        e.ty = name
+        return name
+    end
+
+    # User-defined generic function
+    if has(_generic_funcs, name)
+        return _check_generic_call(e, name)
+    end
+
+    # Regular function call
+    if not has(_funcs, name)
+        _error_at(e, format("unknown function '{}'", name))
+        e.ty = "???"
+        return "???"
+    end
+
+    sig := _funcs[name]
+    ptys := tu.sig_params(sig)
+    rty := tu.sig_ret(sig)
+    if len(ptys) != nargs
+        _error_at(e, format("function '{}' expects {} args, got {}", name, len(ptys), nargs))
+        e.ty = rty
+        return rty
+    end
+    i: i64 = 0
+    while i < nargs
+        at := _check_expr(e.child(i + 1), ptys[i])
+        if at != ptys[i] and not _assignable(at, ptys[i])
+            _error_at(e.child(i + 1), format("argument {} of '{}' expected {}, got {}", i + 1, name, ptys[i], at))
+        end
+        i += 1
+    end
+    e.ty = rty
+    return rty
+end
+
+def _is_builtin(name: str) -> bool
+    return name == "print" or name == "format" or name == "range" or name == "keys" or name == "len"
+end
+
+# ─── Method call checking ────────────────────────────────────────────
+
+def _check_method_call(e: pars.Node, callee: pars.Node, target_ty: str) -> str
+    mname := callee.value
+    obj_ty := _check_expr(callee.child(0), "")
+    nargs := e.child_count() - 1
+
+    # Interface method
+    if has(_iface_names, obj_ty)
+        ii := _ifaces[obj_ty]
+        if not has(ii.method_params, mname)
+            _error_at(e, format("interface '{}' has no method '{}'", obj_ty, mname))
+            e.ty = "???"
+            return "???"
+        end
+        ptys := tu.split_type_list(ii.method_params[mname])
+        rty := ii.method_rets[mname]
+        if len(ptys) != nargs
+            _error_at(e, format("method '{}' expects {} args (excl self), got {}", mname, len(ptys), nargs))
+            e.ty = rty
+            return rty
+        end
+        i: i64 = 0
+        while i < nargs
+            at := _check_expr(e.child(i + 1), ptys[i])
+            if not _assignable(at, ptys[i])
+                _error_at(e.child(i + 1), format("argument {} of '{}' expected {}, got {}", i + 1, mname, ptys[i], at))
+            end
+            i += 1
+        end
+        e.ty = rty
+        return rty
+    end
+
+    # Struct method
+    if has(_struct_names, obj_ty)
+        si := _structs[obj_ty]
+        if not has(si.method_params, mname)
+            _error_at(e, format("struct '{}' has no method '{}'", obj_ty, mname))
+            e.ty = "???"
+            return "???"
+        end
+        ptys := tu.split_type_list(si.method_params[mname])
+        rty := si.method_rets[mname]
+        if len(ptys) != nargs
+            _error_at(e, format("method '{}' expects {} args (excl self), got {}", mname, len(ptys), nargs))
+            e.ty = rty
+            return rty
+        end
+        i: i64 = 0
+        while i < nargs
+            at := _check_expr(e.child(i + 1), ptys[i])
+            if not _assignable(at, ptys[i])
+                _error_at(e.child(i + 1), format("argument {} of '{}' expected {}, got {}", i + 1, mname, ptys[i], at))
+            end
+            i += 1
+        end
+        e.ty = rty
+        return rty
+    end
+
+    # Class method
+    if not has(_class_names, obj_ty)
+        _error_at(e, format("method call on non-class type '{}'", obj_ty))
+        e.ty = "???"
+        return "???"
+    end
+    ci := _classes[obj_ty]
+    if not has(ci.method_params, mname)
+        _error_at(e, format("class '{}' has no method '{}'", obj_ty, mname))
+        e.ty = "???"
+        return "???"
+    end
+    ptys := tu.split_type_list(ci.method_params[mname])
+    rty := ci.method_rets[mname]
+    if len(ptys) != nargs
+        _error_at(e, format("method '{}' expects {} args (excl self), got {}", mname, len(ptys), nargs))
+        e.ty = rty
+        return rty
+    end
+    i: i64 = 0
+    while i < nargs
+        at := _check_expr(e.child(i + 1), ptys[i])
+        if not _assignable(at, ptys[i])
+            _error_at(e.child(i + 1), format("argument {} of '{}' expected {}, got {}", i + 1, mname, ptys[i], at))
+        end
+        i += 1
+    end
+    e.ty = rty
+    return rty
+end
+
+# ─── Function pointer call ───────────────────────────────────────────
+
+def _check_fn_ptr_call(e: pars.Node, fn_ty: str) -> str
+    ptys := tu.fn_param_types(fn_ty)
+    rty := tu.fn_ret_type(fn_ty)
+    nargs := e.child_count() - 1
+    if len(ptys) != nargs
+        _error_at(e, format("function pointer expects {} args, got {}", len(ptys), nargs))
+        e.ty = rty
+        return rty
+    end
+    i: i64 = 0
+    while i < nargs
+        at := _check_expr(e.child(i + 1), ptys[i])
+        if not _assignable(at, ptys[i])
+            _error_at(e.child(i + 1), format("argument {} of function pointer expected {}, got {}", i + 1, ptys[i], at))
+        end
+        i += 1
+    end
+    e.ty = rty
+    return rty
+end
+
+# ─── Generic function call ───────────────────────────────────────────
+
+def _check_generic_call(e: pars.Node, name: str) -> str
+    gf := _generic_funcs[name]
+    nargs := e.child_count() - 1
+
+    # Check all arg types
+    arg_types: List[str] = List[str]()
+    i: i64 = 1
+    while i <= nargs
+        append(arg_types, _check_expr(e.child(i), ""))
+        i += 1
+    end
+
+    # Determine concrete type parameter
+    type_param := e.value
+    concrete_tp := ""
+    if type_param != ""
+        concrete_tp = type_param
+        if not _is_known(concrete_tp)
+            _error_at(e, format("unknown type parameter '{}' in '{}[{}]'", concrete_tp, name, concrete_tp))
+        end
+    else
+        concrete_tp = _infer_generic_type(gf, arg_types, e)
+        if concrete_tp == ""
+            tp_name := func_type_param(gf, 0)
+            _error_at(e, format("cannot infer type parameter '{}' for generic function '{}'", tp_name, name))
+            e.ty = "???"
+            return "???"
+        end
+        e.value = concrete_tp
+    end
+
+    tp_name := func_type_param(gf, 0)
+
+    # Substitute types in param list and return type
+    gf_params := tu.func_params_block(gf)
+    ptys: List[str] = List[str]()
+    j: i64 = 0
+    while j < gf_params.child_count()
+        pty := tu.type_node_to_str(gf_params.child(j).child(0))
+        append(ptys, _subst_type_name(pty, tp_name, concrete_tp))
+        j += 1
+    end
+    rty := _subst_type_name(tu.func_ret_type_str(gf), tp_name, concrete_tp)
+
+    # Validate arity and arg types
+    if len(ptys) != nargs
+        _error_at(e, format("'{}' expects {} args, got {}", name, len(ptys), nargs))
+    else
+        i = 0
+        while i < nargs
+            if not _assignable(arg_types[i], ptys[i])
+                _error_at(e.child(i + 1), format("argument {} of '{}' expected {}, got {}", i + 1, name, ptys[i], arg_types[i]))
+            end
+            i += 1
+        end
+    end
+
+    # Create and register the concrete instantiation
+    tag := elem_tag(concrete_tp)
+    mangled := string.concat(name, string.concat("_", tag))
+    if not has(_funcs, mangled)
+        concrete := _clone_node(gf)
+        concrete.value = mangled
+        # Remove type params from clone (strip first N children that are TYPE_PARAM)
+        tp_count := tu.func_type_param_count(gf)
+        if tp_count > 0
+            new_children: List[pars.Node] = List[pars.Node]()
+            ci: i64 = tp_count
+            while ci < concrete.child_count()
+                append(new_children, concrete.child(ci))
+                ci += 1
+            end
+            concrete.children = new_children
+        end
+        # Substitute type params in the cloned AST
+        _subst_node(concrete, tp_name, concrete_tp)
+        # Register
+        _funcs[mangled] = encode_sig(ptys, rty)
+        _prog.add_child(concrete)
+        # Typecheck the instantiation
+        _check_func(concrete)
+    end
+
+    e.ty = rty
+    return rty
+end
+
+def _infer_generic_type(gf: pars.Node, arg_types: List[str], loc: pars.Node) -> str
+    tp_name := func_type_param(gf, 0)
+    params := tu.func_params_block(gf)
+    i: i64 = 0
+    while i < params.child_count() and i < len(arg_types)
+        pty := tu.type_node_to_str(params.child(i).child(0))
+        at := arg_types[i]
+        if pty == tp_name
+            return at
+        end
+        if tu.is_list_type(pty) and tu.list_elem_type(pty) == tp_name and tu.is_list_type(at)
+            return tu.list_elem_type(at)
+        end
+        if tu.is_dict_type(pty) and tu.dict_val_type(pty) == tp_name and tu.is_dict_type(at)
+            return tu.dict_val_type(at)
+        end
+        i += 1
+    end
+    return ""
+end
+
+# ─── Main entry point ───────────────────────────────────────────────
+
+def check(prog: pars.Node, s: sink.Sink)
+    _sink = s
+    _file = prog.value
+    _prog = prog
+    _had_error = False
+
+    # Clear all registries
+    _class_names = Dict[str, i64]()
+    _struct_names = Dict[str, i64]()
+    _iface_names = Dict[str, i64]()
+    _enum_names = Dict[str, i64]()
+    _class_implements = Dict[str, str]()
+    _classes = Dict[str, ClassInfo]()
+    _structs = Dict[str, StructInfo]()
+    _ifaces = Dict[str, InterfaceInfo]()
+    _enum_variants = Dict[str, Dict[str, i64]]()
+    _funcs = Dict[str, str]()
+    _generic_funcs = Dict[str, pars.Node]()
+    _vars = symtab.SymbolTable()
+    _cur_ret = ""
+    _loop_depth = 0
+    _cur_class = ""
+    _cur_struct = ""
+
+    # ── Pass 0: register interface and enum names ──────────────
+    i: i64 = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.INTERFACE_DECL
+            name := n.value
+            if has(_BASE_TYPES, name)
+                _error_at(n, format("interface '{}' conflicts with built-in type", name))
+            end
+            _iface_names[name] = 1
+        end
+        i += 1
+    end
+
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.ENUM_DECL
+            name := n.value
+            if has(_BASE_TYPES, name) or has(_iface_names, name)
+                _error_at(n, format("enum '{}' conflicts with existing type", name))
+            end
+            _enum_names[name] = 1
+            variants: Dict[str, i64] = Dict[str, i64]()
+            next_val: i64 = 0
+            j: i64 = 0
+            while j < n.child_count()
+                v := n.child(j)
+                vname := v.value
+                # Explicit value?
+                if v.child_count() > 0
+                    next_val = string.str_to_i64(v.child(0).value)
+                end
+                if has(variants, vname)
+                    _error_at(v, format("duplicate enum variant '{}'", vname))
+                end
+                variants[vname] = next_val
+                # Store the resolved value back on the node
+                v.ty = string.i64_to_str(next_val)
+                next_val += 1
+                j += 1
+            end
+            _enum_variants[name] = variants
+        end
+        i += 1
+    end
+    if _had_error
+        return
+    end
+
+    # ── Pass 1: register class and struct names ────────────────
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.CLASS_DECL
+            name := n.value
+            if has(_BASE_TYPES, name)
+                _error_at(n, format("class '{}' conflicts with built-in type", name))
+            end
+            if has(_iface_names, name)
+                _error_at(n, format("class '{}' conflicts with interface name", name))
+            end
+            _class_names[name] = 1
+        end
+        i += 1
+    end
+
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.STRUCT_DECL
+            name := n.value
+            if has(_BASE_TYPES, name) or has(_class_names, name) or has(_iface_names, name) or has(_enum_names, name)
+                _error_at(n, format("struct '{}' conflicts with existing type", name))
+            end
+            _struct_names[name] = 1
+        end
+        i += 1
+    end
+    if _had_error
+        return
+    end
+
+    # ── Validate and register interfaces ───────────────────────
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.INTERFACE_DECL
+            ii := InterfaceInfo(n.value)
+            j: i64 = 0
+            while j < n.child_count()
+                ms := n.child(j)
+                if ms.kind == mp.NodeKind.METHOD_SIG
+                    mname := ms.value
+                    ms_params := ms.child(0)   # BLOCK("params") with PARAM children
+                    ms_ret := tu.type_node_to_str(ms.child(1))
+                    # First PARAM must be self
+                    if ms_params.child_count() == 0 or ms_params.child(0).value != "self"
+                        _error_at(ms, format("interface method '{}' must have 'self' as first parameter", mname))
+                    end
+                    ptys: List[str] = List[str]()
+                    k: i64 = 1
+                    while k < ms_params.child_count()
+                        p := ms_params.child(k)  # PARAM node
+                        pty := tu.type_node_to_str(p.child(0))  # TYPE child of PARAM
+                        _require_known(p.line, p.col, pty)
+                        append(ptys, pty)
+                        k += 1
+                    end
+                    if ms_ret != "void"
+                        _require_known(ms.line, ms.col, ms_ret)
+                    end
+                    ii.method_params[mname] = strutils.join(ptys, ",")
+                    ii.method_rets[mname] = ms_ret
+                end
+                j += 1
+            end
+            _ifaces[n.value] = ii
+        end
+        i += 1
+    end
+    if _had_error
+        return
+    end
+
+    # ── Pass 2: validate class fields/methods, build ClassInfo ─
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.CLASS_DECL
+            cls_name := n.value
+            ci := ClassInfo(cls_name)
+
+            # Collect interface names -- TYPE children at the start
+            impl_list: List[str] = List[str]()
+            j: i64 = 0
+            while j < n.child_count() and n.child(j).kind == mp.NodeKind.TYPE
+                append(impl_list, n.child(j).value)
+                j += 1
+            end
+
+            # Process fields and methods (j continues from after TYPE children)
+            while j < n.child_count()
+                ch := n.child(j)
+                if ch.kind == mp.NodeKind.FIELD_DECL
+                    fname := ch.value
+                    fty := tu.type_node_to_str(ch.child(0))
+                    _require_known(ch.line, ch.col, fty)
+                    ci.field_types[fname] = fty
+                elif ch.kind == mp.NodeKind.FUNC_DECL
+                    mname := ch.value
+                    m_params := tu.func_params_block(ch)
+                    # First param must be self
+                    if m_params.child_count() == 0 or m_params.child(0).value != "self"
+                        _error_at(ch, format("class method '{}' must have 'self' as first parameter", mname))
+                    end
+                    ptys: List[str] = List[str]()
+                    k: i64 = 1
+                    while k < m_params.child_count()
+                        p := m_params.child(k)
+                        pty := tu.type_node_to_str(p.child(0))
+                        if pty == "Self"
+                            pty = cls_name
+                        end
+                        _require_known(p.line, p.col, pty)
+                        append(ptys, pty)
+                        k += 1
+                    end
+                    rty := tu.func_ret_type_str(ch)
+                    if rty == "Self"
+                        rty = cls_name
+                    end
+                    if rty != "void"
+                        _require_known(ch.line, ch.col, rty)
+                    end
+                    ci.method_params[mname] = strutils.join(ptys, ",")
+                    ci.method_rets[mname] = rty
+                    if mname == "init"
+                        ci.init_param_types = ptys
+                    end
+                end
+                j += 1
+            end
+
+            _classes[cls_name] = ci
+
+            # Validate implements
+            impl_names := ""
+            k: i64 = 0
+            while k < len(impl_list)
+                iname := impl_list[k]
+                if not has(_ifaces, iname)
+                    _error_at(n, format("class '{}' implements unknown interface '{}'", cls_name, iname))
+                else
+                    ii := _ifaces[iname]
+                    # Check all methods are present with matching signatures
+                    mkeys := keys(ii.method_params)
+                    m: i64 = 0
+                    while m < len(mkeys)
+                        mname := mkeys[m]
+                        if not has(ci.method_params, mname)
+                            _error_at(n, format("class '{}' is missing method '{}' required by interface '{}'", cls_name, mname, iname))
+                        else
+                            if ci.method_params[mname] != ii.method_params[mname] or ci.method_rets[mname] != ii.method_rets[mname]
+                                _error_at(n, format("method '{}' in class '{}' does not match interface '{}' signature", mname, cls_name, iname))
+                            end
+                        end
+                        m += 1
+                    end
+                end
+                if k > 0
+                    impl_names = string.concat(impl_names, ",")
+                end
+                impl_names = string.concat(impl_names, iname)
+                k += 1
+            end
+            _class_implements[cls_name] = impl_names
+        end
+        i += 1
+    end
+    if _had_error
+        return
+    end
+
+    # Detect circular class references
+    _check_circular_refs()
+    if _had_error
+        return
+    end
+
+    # ── Pass 2b: validate struct fields/methods ────────────────
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.STRUCT_DECL
+            st_name := n.value
+            si := StructInfo(st_name)
+
+            j: i64 = 0
+            while j < n.child_count()
+                ch := n.child(j)
+                if ch.kind == mp.NodeKind.FIELD_DECL
+                    fname := ch.value
+                    fty := tu.type_node_to_str(ch.child(0))
+                    _require_known(ch.line, ch.col, fty)
+                    if _is_ref_type(fty)
+                        _error_at(ch, format("struct field '{}' cannot have reference type '{}' - only value types allowed", fname, fty))
+                    end
+                    si.field_types[fname] = fty
+                    append(si.field_order, fname)
+                elif ch.kind == mp.NodeKind.FUNC_DECL
+                    mname := ch.value
+                    if mname == "init"
+                        _error_at(ch, "structs cannot have 'init' methods")
+                    end
+                    m_params := tu.func_params_block(ch)
+                    if m_params.child_count() == 0 or m_params.child(0).value != "self"
+                        _error_at(ch, format("struct method '{}' must have 'self' as first parameter", mname))
+                    end
+                    ptys: List[str] = List[str]()
+                    k: i64 = 1
+                    while k < m_params.child_count()
+                        p := m_params.child(k)
+                        pty := tu.type_node_to_str(p.child(0))
+                        if pty == "Self"
+                            pty = st_name
+                        end
+                        _require_known(p.line, p.col, pty)
+                        append(ptys, pty)
+                        k += 1
+                    end
+                    rty := tu.func_ret_type_str(ch)
+                    if rty == "Self"
+                        rty = st_name
+                    end
+                    if rty != "void"
+                        _require_known(ch.line, ch.col, rty)
+                    end
+                    si.method_params[mname] = strutils.join(ptys, ",")
+                    si.method_rets[mname] = rty
+                end
+                j += 1
+            end
+
+            _structs[st_name] = si
+        end
+        i += 1
+    end
+    if _had_error
+        return
+    end
+
+    # Detect circular struct references
+    _check_struct_cycles()
+    if _had_error
+        return
+    end
+
+    # ── Pass 3: register function signatures ───────────────────
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.FUNC_DECL
+            fname := n.value
+            tp_count := tu.func_type_param_count(n)
+            if tp_count > 0
+                _generic_funcs[fname] = n
+            else
+                rty := tu.func_ret_type_str(n)
+                if rty != "void"
+                    _require_known(n.line, n.col, rty)
+                end
+                params := tu.func_params_block(n)
+                ptys: List[str] = List[str]()
+                j: i64 = 0
+                while j < params.child_count()
+                    p := params.child(j)
+                    pty := tu.type_node_to_str(p.child(0))
+                    _require_known(p.line, p.col, pty)
+                    append(ptys, pty)
+                    j += 1
+                end
+                if has(_funcs, fname)
+                    _error_at(n, format("duplicate function '{}'", fname))
+                end
+                _funcs[fname] = encode_sig(ptys, rty)
+            end
+        end
+        i += 1
+    end
+    if _had_error
+        return
+    end
+
+    # ── Pass 4: type-check top-level statements ────────────────
+    _vars.enter_scope()
+    _cur_ret = ""
+    _loop_depth = 0
+
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        k := n.kind
+        if k != mp.NodeKind.FUNC_DECL and k != mp.NodeKind.CLASS_DECL and k != mp.NodeKind.STRUCT_DECL and k != mp.NodeKind.INTERFACE_DECL and k != mp.NodeKind.ENUM_DECL and k != mp.NodeKind.IMPORT and k != mp.NodeKind.EXTERN
+            _check_stmt(n)
+        end
+        if _had_error
+            _vars.leave_scope()
+            return
+        end
+        i += 1
+    end
+
+    # ── Pass 5: type-check function bodies ─────────────────────
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.FUNC_DECL and tu.func_type_param_count(n) == 0
+            _check_func(n)
+        end
+        if _had_error
+            _vars.leave_scope()
+            return
+        end
+        i += 1
+    end
+
+    # ── Pass 6: type-check class methods ───────────────────────
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.CLASS_DECL
+            cls_name := n.value
+            j: i64 = 0
+            while j < n.child_count()
+                ch := n.child(j)
+                if ch.kind == mp.NodeKind.FUNC_DECL
+                    _check_type_method(cls_name, ch, False)
+                end
+                j += 1
+            end
+        end
+        if _had_error
+            _vars.leave_scope()
+            return
+        end
+        i += 1
+    end
+
+    # ── Pass 7: type-check struct methods ──────────────────────
+    i = 0
+    while i < prog.child_count()
+        n := prog.child(i)
+        if n.kind == mp.NodeKind.STRUCT_DECL
+            st_name := n.value
+            j: i64 = 0
+            while j < n.child_count()
+                ch := n.child(j)
+                if ch.kind == mp.NodeKind.FUNC_DECL
+                    _check_type_method(st_name, ch, True)
+                end
+                j += 1
+            end
+        end
+        if _had_error
+            _vars.leave_scope()
+            return
+        end
+        i += 1
+    end
+
+    _vars.leave_scope()
+end

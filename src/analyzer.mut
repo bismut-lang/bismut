@@ -1,0 +1,417 @@
+# analyzer.mut — Project analyzer for IDE integration
+#
+# Runs the compiler pipeline (preprocess → parse → resolve → typecheck)
+# without code generation. Collects all diagnostics and symbol information
+# into structured data that can be serialized to JSON for IDE consumption.
+#
+# Usage:
+#   import analyzer as az
+#   result := az.analyze(src_file, compiler_dir)
+#   json := az.result_to_json(result)
+
+extern string
+extern stringbuilder
+extern filesystem
+
+import langtools.pars
+import langtools.sink
+import preprocessor as pp
+import parser as mp
+import typecheck as tc
+import import_resolver as ir
+import type_utils as tu
+import strutils as su
+import pathutils as pu
+
+# ─── Symbol info for IDE hover ───────────────────────────────────────
+
+class SymbolInfo
+    name: str
+    kind: str
+    file: str
+    line: i64
+    col: i64
+    doc: str
+    detail: str
+    parent: str
+
+    def init(self, name: str, kind: str, file: str, line: i64, col: i64, doc: str, detail: str, parent: str)
+        self.name = name
+        self.kind = kind
+        self.file = file
+        self.line = line
+        self.col = col
+        self.doc = doc
+        self.detail = detail
+        self.parent = parent
+    end
+end
+
+# ─── Analysis result ─────────────────────────────────────────────────
+
+class AnalysisResult
+    success: bool
+    diagnostics: List[sink.Message]
+    symbols: List[SymbolInfo]
+    error_count: i64
+    warning_count: i64
+    file: str
+
+    def init(self, file: str)
+        self.success = False
+        self.diagnostics = List[sink.Message]()
+        self.symbols = List[SymbolInfo]()
+        self.error_count = 0
+        self.warning_count = 0
+        self.file = file
+    end
+end
+
+# ─── Public API ──────────────────────────────────────────────────────
+
+def analyze(src_file: str, compiler_dir: str, defines: List[str]) -> AnalysisResult
+    result := AnalysisResult(src_file)
+
+    # Check file exists
+    if not filesystem.exists(src_file)
+        s := sink.Sink()
+        s.error(src_file, 1, 1, 0, format("file '{}' not found", src_file))
+        result.diagnostics = s.messages
+        result.error_count = 1
+        return result
+    end
+
+    # Read source
+    source := filesystem.read(src_file)
+
+    # Preprocess
+    source = pp.preprocess_with_defines(source, src_file, defines)
+
+    # Parse
+    s := sink.Sink()
+    prog := mp.parse(src_file, source, s)
+    if s.has_errors()
+        _collect_diagnostics(result, s)
+        return result
+    end
+
+    # Resolve imports and externs
+    ext := ir.resolve(prog, src_file, compiler_dir, s, defines)
+    if s.has_errors()
+        _collect_diagnostics(result, s)
+        return result
+    end
+
+    # Type check
+    tc.check(prog, s)
+    _collect_diagnostics(result, s)
+
+    if not s.has_errors()
+        result.success = True
+    end
+
+    # Extract symbols with doc comments
+    _collect_symbols(result, prog)
+
+    return result
+end
+
+# ─── Collect diagnostics from sink ───────────────────────────────────
+
+def _collect_diagnostics(result: AnalysisResult, s: sink.Sink)
+    result.error_count = s.error_count
+    result.warning_count = s.warning_count
+    i: i64 = 0
+    while i < s.count()
+        append(result.diagnostics, s.get(i))
+        i += 1
+    end
+end
+
+# ─── Symbol extraction ───────────────────────────────────────────────
+def _sym(result: AnalysisResult, name: str, kind: str, n: pars.Node, parent: str, detail: str)
+    append(result.symbols, SymbolInfo(name, kind, n.file, n.line, n.col, n.doc, detail, parent))
+end
+
+def _func_signature(f: pars.Node) -> str
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "(")
+    params := tu.func_params_block(f)
+    first := True
+    i: i64 = 0
+    while i < params.child_count()
+        p := params.child(i)
+        if p.value != "self"
+            if not first
+                stringbuilder.append_str(sb, ", ")
+            end
+            stringbuilder.append_str(sb, p.value)
+            stringbuilder.append_str(sb, ": ")
+            if p.child_count() > 0
+                stringbuilder.append_str(sb, tu.type_node_to_str(p.child(0)))
+            end
+            first = False
+        end
+        i += 1
+    end
+    stringbuilder.append_str(sb, ") -> ")
+    ret := tu.func_ret_type_str(f)
+    stringbuilder.append_str(sb, ret)
+    return stringbuilder.build(sb)
+end
+
+def _collect_symbols(result: AnalysisResult, prog: pars.Node)
+    i: i64 = 0
+    while i < prog.child_count()
+        child := prog.child(i)
+        k := child.kind
+        if k == mp.NodeKind.FUNC_DECL
+            sig := _func_signature(child)
+            _sym(result, child.value, "function", child, "", sig)
+            _collect_params(result, child)
+        elif k == mp.NodeKind.CLASS_DECL
+            _sym(result, child.value, "class", child, "", "")
+            _collect_member_symbols(result, child)
+        elif k == mp.NodeKind.STRUCT_DECL
+            _sym(result, child.value, "struct", child, "", "")
+            _collect_member_symbols(result, child)
+        elif k == mp.NodeKind.INTERFACE_DECL
+            _sym(result, child.value, "interface", child, "", "")
+            _collect_interface_members(result, child)
+        elif k == mp.NodeKind.ENUM_DECL
+            _sym(result, child.value, "enum", child, "", "")
+            _collect_enum_variants(result, child)
+        elif k == mp.NodeKind.VAR_DECL
+            _sym(result, child.value, "variable", child, "", child.ty)
+        elif k == mp.NodeKind.CONST_DECL
+            _sym(result, child.value, "constant", child, "", child.ty)
+        end
+        i += 1
+    end
+end
+
+def _collect_member_symbols(result: AnalysisResult, parent: pars.Node)
+    pname := parent.value
+    j: i64 = 0
+    while j < parent.child_count()
+        member := parent.child(j)
+        if member.kind == mp.NodeKind.FUNC_DECL
+            name := format("{}.{}", pname, member.value)
+            sig := _func_signature(member)
+            _sym(result, name, "method", member, pname, sig)
+            _collect_params(result, member)
+        elif member.kind == mp.NodeKind.FIELD_DECL
+            name := format("{}.{}", pname, member.value)
+            ty_str := ""
+            if member.child_count() > 0
+                ty_str = tu.type_node_to_str(member.child(0))
+            end
+            append(result.symbols, SymbolInfo(name, "field", member.file, member.line, member.col, ty_str, ty_str, pname))
+        end
+        j += 1
+    end
+end
+
+def _collect_interface_members(result: AnalysisResult, parent: pars.Node)
+    pname := parent.value
+    j: i64 = 0
+    while j < parent.child_count()
+        member := parent.child(j)
+        if member.kind == mp.NodeKind.METHOD_SIG
+            name := format("{}.{}", pname, member.value)
+            _sym(result, name, "method_sig", member, pname, "")
+        end
+        j += 1
+    end
+end
+
+def _collect_enum_variants(result: AnalysisResult, parent: pars.Node)
+    pname := parent.value
+    j: i64 = 0
+    while j < parent.child_count()
+        member := parent.child(j)
+        if member.kind == mp.NodeKind.ENUM_VARIANT
+            name := format("{}.{}", pname, member.value)
+            _sym(result, name, "enum_variant", member, pname, pname)
+        end
+        j += 1
+    end
+end
+
+def _collect_params(result: AnalysisResult, func: pars.Node)
+    j: i64 = 0
+    while j < func.child_count()
+        child := func.child(j)
+        if child.kind == mp.NodeKind.BLOCK and child.value == "params"
+            k: i64 = 0
+            while k < child.child_count()
+                param := child.child(k)
+                if param.kind == mp.NodeKind.PARAM and param.value != "self"
+                    pname := format("{}.{}", func.value, param.value)
+                    ty_str := ""
+                    if param.child_count() > 0
+                        ty_str = tu.type_node_to_str(param.child(0))
+                    end
+                    append(result.symbols, SymbolInfo(pname, "parameter", param.file, param.line, param.col, ty_str, ty_str, func.value))
+                end
+                k += 1
+            end
+            return
+        end
+        j += 1
+    end
+end
+
+# ─── JSON serialization ─────────────────────────────────────────────
+
+def result_to_json(r: AnalysisResult) -> str
+    sb := stringbuilder.new()
+    stringbuilder.append_str(sb, "{\n")
+    stringbuilder.append_str(sb, "  \"success\": ")
+    if r.success
+        stringbuilder.append_str(sb, "true")
+    else
+        stringbuilder.append_str(sb, "false")
+    end
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "  \"file\": ")
+    _json_str(sb, r.file)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "  \"error_count\": ")
+    stringbuilder.append_i64(sb, r.error_count)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "  \"warning_count\": ")
+    stringbuilder.append_i64(sb, r.warning_count)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "  \"diagnostics\": [\n")
+    i: i64 = 0
+    while i < len(r.diagnostics)
+        m := r.diagnostics[i]
+        _emit_diagnostic_json(sb, m)
+        if i < len(r.diagnostics) - 1
+            stringbuilder.append_str(sb, ",\n")
+        else
+            stringbuilder.append_str(sb, "\n")
+        end
+        i += 1
+    end
+    stringbuilder.append_str(sb, "  ],\n")
+
+    stringbuilder.append_str(sb, "  \"symbols\": [\n")
+    j: i64 = 0
+    while j < len(r.symbols)
+        sym := r.symbols[j]
+        _emit_symbol_json(sb, sym)
+        if j < len(r.symbols) - 1
+            stringbuilder.append_str(sb, ",\n")
+        else
+            stringbuilder.append_str(sb, "\n")
+        end
+        j += 1
+    end
+    stringbuilder.append_str(sb, "  ]\n")
+
+    stringbuilder.append_str(sb, "}")
+    return stringbuilder.build(sb)
+end
+
+# ─── JSON helpers ────────────────────────────────────────────────────
+
+def _emit_diagnostic_json(sb: stringbuilder.StringBuilder, m: sink.Message)
+    stringbuilder.append_str(sb, "    {\n")
+
+    stringbuilder.append_str(sb, "      \"severity\": ")
+    if m.severity == sink.Severity.ERROR
+        _json_str(sb, "error")
+    elif m.severity == sink.Severity.WARNING
+        _json_str(sb, "warning")
+    else
+        _json_str(sb, "note")
+    end
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"file\": ")
+    _json_str(sb, m.file)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"line\": ")
+    stringbuilder.append_i64(sb, m.line)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"col\": ")
+    stringbuilder.append_i64(sb, m.col)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"span\": ")
+    stringbuilder.append_i64(sb, m.span)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"message\": ")
+    _json_str(sb, m.msg)
+    stringbuilder.append_str(sb, "\n")
+
+    stringbuilder.append_str(sb, "    }")
+end
+
+def _emit_symbol_json(sb: stringbuilder.StringBuilder, sym: SymbolInfo)
+    stringbuilder.append_str(sb, "    {\n")
+
+    stringbuilder.append_str(sb, "      \"name\": ")
+    _json_str(sb, sym.name)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"kind\": ")
+    _json_str(sb, sym.kind)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"file\": ")
+    _json_str(sb, sym.file)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"line\": ")
+    stringbuilder.append_i64(sb, sym.line)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"col\": ")
+    stringbuilder.append_i64(sb, sym.col)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"doc\": ")
+    _json_str(sb, sym.doc)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"detail\": ")
+    _json_str(sb, sym.detail)
+    stringbuilder.append_str(sb, ",\n")
+
+    stringbuilder.append_str(sb, "      \"parent\": ")
+    _json_str(sb, sym.parent)
+    stringbuilder.append_str(sb, "\n")
+
+    stringbuilder.append_str(sb, "    }")
+end
+
+def _json_str(sb: stringbuilder.StringBuilder, s: str)
+    stringbuilder.append_str(sb, "\"")
+    i: i64 = 0
+    while i < len(s)
+        c := s[i]
+        if c == '"'
+            stringbuilder.append_str(sb, "\\\"")
+        elif c == '\\'
+            stringbuilder.append_str(sb, "\\\\")
+        elif c == '\n'
+            stringbuilder.append_str(sb, "\\n")
+        elif c == '\t'
+            stringbuilder.append_str(sb, "\\t")
+        else
+            stringbuilder.append_str(sb, string.chr(c))
+        end
+        i += 1
+    end
+    stringbuilder.append_str(sb, "\"")
+end

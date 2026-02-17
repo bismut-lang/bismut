@@ -1,0 +1,66 @@
+# Test chained method calls on ref-type returns.
+# Intermediate results must be released — no leaks.
+# EXPECTED:3\n99\n42\nhello\n5
+
+class Node
+    val: i64
+    next: Node
+    def init(self, val: i64)
+        self.val = val
+    end
+    def get_next(self) -> Node
+        return self.next
+    end
+end
+
+# --- chained method calls: a.get_next().get_next().val ---
+a := Node(1)
+b := Node(2)
+c := Node(3)
+a.next = b
+b.next = c
+print(a.get_next().get_next().val)
+
+# --- chained field access on method return ---
+d := Node(20)
+e := Node(99)
+d.next = e
+print(d.get_next().val)
+
+# --- method returning class used in expression ---
+class Box
+    v: i64
+    def init(self, v: i64)
+        self.v = v
+    end
+    def dup(self) -> Box
+        return Box(self.v)
+    end
+end
+
+x := Box(42)
+print(x.dup().v)
+
+# --- chained access with str field ---
+class Tag
+    name: str
+    def init(self, name: str)
+        self.name = name
+    end
+    def self_ref(self) -> Tag
+        return self
+    end
+end
+
+t := Tag("hello")
+print(t.self_ref().name)
+
+# --- two-level chain in a for loop ---
+count: i64 = 0
+f := Node(20)
+g := Node(5)
+f.next = g
+for i:i64 in range(f.get_next().val)
+    count += 1
+end
+print(count)

@@ -1,0 +1,18 @@
+# Runtime panic: null pointer dereference on interface method call
+
+interface IShape
+    def name(self) -> str
+end
+
+class Circle : IShape
+    r: i64
+    def init(self, r: i64)
+        self.r = r
+    end
+    def name(self) -> str
+        return "Circle"
+    end
+end
+
+s: IShape = None
+print(s.name())

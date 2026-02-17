@@ -1,0 +1,35 @@
+# Test symtab.mut — scoped symbol table
+import langtools.symtab
+
+st := symtab.SymbolTable()
+
+# No scopes yet
+print(st.depth())
+
+# Define in global scope
+st.enter_scope()
+st.define("x", "i64")
+st.define("y", "str")
+print(st.has("x"))
+print(st.has("z"))
+print(st.lookup("x"))
+print(st.depth())
+
+# Inner scope shadows
+st.enter_scope()
+st.define("x", "f64")
+print(st.lookup("x"))
+print(st.has_local("x"))
+print(st.has_local("y"))
+
+# Leave inner scope
+st.leave_scope()
+print(st.lookup("x"))
+print(st.depth())
+
+# Leave global scope
+st.leave_scope()
+print(st.depth())
+print(st.has("x"))
+
+print("done")

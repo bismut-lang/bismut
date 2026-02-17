@@ -1,0 +1,8 @@
+# ERROR: 'as' downcast requires interface on LHS, struct is not an interface
+struct Point
+    x: i64
+    y: i64
+end
+
+p := Point(1, 2)
+q := p as Point

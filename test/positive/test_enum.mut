@@ -1,0 +1,55 @@
+# Test basic enum
+enum Color
+    RED, GREEN, BLUE
+end
+
+# Test enum with explicit values
+enum Status
+    OK = 0
+    ERROR = 10
+    PENDING
+end
+
+# Use enum values
+c: Color = Color.GREEN
+print(c)
+
+# Direct variant print
+print(Color.GREEN)
+
+s: Status = Status.ERROR
+print(s)
+
+# Auto-increment after explicit value
+print(Status.PENDING)
+
+# Enum is interchangeable with i64
+x: i64 = Color.BLUE
+print(x)
+
+# Arithmetic with enum values
+print(Color.RED + 1)
+
+# Comparison
+if c == Color.GREEN
+    print(1)
+end
+
+if s != Status.OK
+    print(1)
+end
+
+# Use in function
+def print_color(c: Color)
+    if c == Color.RED
+        print(0)
+    elif c == Color.GREEN
+        print(1)
+    elif c == Color.BLUE
+        print(2)
+    end
+end
+
+print_color(Color.RED)
+print_color(Color.GREEN)
+print_color(Color.BLUE)

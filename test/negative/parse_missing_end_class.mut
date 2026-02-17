@@ -1,0 +1,6 @@
+# Negative: missing 'end' to close class
+class Foo
+    x: i64
+    def init(self, x: i64)
+        self.x = x
+    end

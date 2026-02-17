@@ -1,0 +1,6 @@
+# Negative: access an undefined enum variant
+enum Color
+    RED, GREEN, BLUE
+end
+
+x: i64 = Color.YELLOW

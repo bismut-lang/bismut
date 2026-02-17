@@ -1,0 +1,113 @@
+# Test: and and or short-circuit evaluation
+# Regression test: RHS of and and or must not be evaluated when LHS determines result.
+# Previously, the compiler eagerly evaluated side-effects (null checks, bounds checks)
+# for both sides, causing crashes when the LHS should have short-circuited.
+
+extern string
+
+# ─── Test 1: and short-circuits on false ───────────────────────────────
+# Access beyond list bounds — must not crash because LHS is false.
+nums: List[i64] = List[i64]()
+if len(nums) > 0 and nums[0] == 42
+    print("FAIL 1")
+else
+    print("PASS 1")
+end
+
+# ─── Test 2: or short-circuits on true ────────────────────────────────
+# Access beyond list bounds — must not crash because LHS is true.
+if len(nums) == 0 or nums[0] == 42
+    print("PASS 2")
+else
+    print("FAIL 2")
+end
+
+# ─── Test 3: and evaluates RHS when LHS is true ───────────────────────
+append(nums, 42)
+if len(nums) > 0 and nums[0] == 42
+    print("PASS 3")
+else
+    print("FAIL 3")
+end
+
+# ─── Test 4: or evaluates RHS when LHS is false ──────────────────────
+if len(nums) == 0 or nums[0] == 42
+    print("PASS 4")
+else
+    print("FAIL 4")
+end
+
+# ─── Test 5: chained and with short-circuit ────────────────────────────
+items: List[i64] = List[i64]()
+if len(items) > 0 and items[0] > 10 and items[0] < 100
+    print("FAIL 5")
+else
+    print("PASS 5")
+end
+
+# ─── Test 6: null check pattern with and ──────────────────────────────
+class Node
+    val: i64
+    next: Node
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+n: Node = None
+if n != None and n.val == 42
+    print("FAIL 6")
+else
+    print("PASS 6")
+end
+
+# ─── Test 7: null check with or ──────────────────────────────────────
+if n == None or n.val == 42
+    print("PASS 7")
+else
+    print("FAIL 7")
+end
+
+# ─── Test 8: method calls in and condition ─────────────────────────────
+class Box
+    v: i64
+    def init(self, v: i64)
+        self.v = v
+    end
+    def get(self) -> i64
+        return self.v
+    end
+end
+
+b: Box = None
+if b != None and b.get() == 10
+    print("FAIL 8")
+else
+    print("PASS 8")
+end
+
+b = Box(10)
+if b != None and b.get() == 10
+    print("PASS 9")
+else
+    print("FAIL 9")
+end
+
+# ─── Test 10: nested and and or ────────────────────────────────────────
+empty: List[i64] = List[i64]()
+if (len(empty) > 0 and empty[0] == 1) or True
+    print("PASS 10")
+else
+    print("FAIL 10")
+end
+
+# expect:PASS 1
+# expect:PASS 2
+# expect:PASS 3
+# expect:PASS 4
+# expect:PASS 5
+# expect:PASS 6
+# expect:PASS 7
+# expect:PASS 8
+# expect:PASS 9
+# expect:PASS 10

@@ -1,0 +1,175 @@
+# graph.mut — Directed graph with topological sort and cycle detection
+#
+# String-keyed directed graph. Add nodes and edges, then topo-sort or
+# detect cycles. Useful for import ordering, type dependency resolution.
+#
+# Usage:
+#   import langtools.graph
+#   g := graph.Graph()
+#   g.add_node("a")
+#   g.add_node("b")
+#   g.add_node("c")
+#   g.add_edge("a", "b")    # a depends on b
+#   g.add_edge("b", "c")    # b depends on c
+#   sorted := g.topo_sort()  # ["c", "b", "a"]
+
+extern string
+
+# ─── Graph class ──────────────────────────────────────────────────────
+
+class Graph
+    adj: Dict[str, List[str]]
+    nodes: List[str]
+
+    def init(self)
+        self.adj = Dict[str, List[str]]()
+        self.nodes = List[str]()
+    end
+
+    def add_node(self, name: str)
+        if not has(self.adj, name)
+            self.adj[name] = List[str]()
+            append(self.nodes, name)
+        end
+    end
+
+    def add_edge(self, from_node: str, to_node: str)
+        self.add_node(from_node)
+        self.add_node(to_node)
+        edges := self.adj[from_node]
+        append(edges, to_node)
+    end
+
+    def has_cycle(self) -> bool
+        cycle := self.find_cycle()
+        return len(cycle) > 0
+    end
+
+    def find_cycle(self) -> List[str]
+        # DFS with 3-color marking: 0=white, 1=gray, 2=black
+        color: Dict[str, i64] = Dict[str, i64]()
+        i: i64 = 0
+        while i < len(self.nodes)
+            color[self.nodes[i]] = 0
+            i += 1
+        end
+        # Path tracking
+        path: List[str] = List[str]()
+        i = 0
+        while i < len(self.nodes)
+            node := self.nodes[i]
+            if color[node] == 0
+                cycle := self._dfs_cycle(node, color, path)
+                if len(cycle) > 0
+                    return cycle
+                end
+            end
+            i += 1
+        end
+        return List[str]()
+    end
+
+    def _dfs_cycle(self, node: str, color: Dict[str, i64], path: List[str]) -> List[str]
+        color[node] = 1
+        append(path, node)
+        edges := self.adj[node]
+        j: i64 = 0
+        while j < len(edges)
+            next := edges[j]
+            if color[next] == 1
+                # Found cycle — extract from path starting at `next`
+                cycle: List[str] = List[str]()
+                k := len(path) - 1
+                while k >= 0
+                    append(cycle, path[k])
+                    if path[k] == next and k < len(path) - 1
+                        return _reverse(cycle)
+                    end
+                    k -= 1
+                end
+                return _reverse(cycle)
+            end
+            if color[next] == 0
+                result := self._dfs_cycle(next, color, path)
+                if len(result) > 0
+                    return result
+                end
+            end
+            j += 1
+        end
+        color[node] = 2
+        pop(path)
+        return List[str]()
+    end
+
+    def topo_sort(self) -> List[str]
+        # Kahn's algorithm
+        # Compute in-degrees
+        in_deg: Dict[str, i64] = Dict[str, i64]()
+        i: i64 = 0
+        while i < len(self.nodes)
+            in_deg[self.nodes[i]] = 0
+            i += 1
+        end
+        i = 0
+        while i < len(self.nodes)
+            node := self.nodes[i]
+            edges := self.adj[node]
+            j: i64 = 0
+            while j < len(edges)
+                target := edges[j]
+                in_deg[target] = in_deg[target] + 1
+                j += 1
+            end
+            i += 1
+        end
+        # Initialize queue with zero in-degree nodes
+        queue: List[str] = List[str]()
+        i = 0
+        while i < len(self.nodes)
+            node := self.nodes[i]
+            if in_deg[node] == 0
+                append(queue, node)
+            end
+            i += 1
+        end
+        result: List[str] = List[str]()
+        head: i64 = 0
+        while head < len(queue)
+            node := queue[head]
+            head += 1
+            append(result, node)
+            edges := self.adj[node]
+            j: i64 = 0
+            while j < len(edges)
+                target := edges[j]
+                in_deg[target] = in_deg[target] - 1
+                if in_deg[target] == 0
+                    append(queue, target)
+                end
+                j += 1
+            end
+        end
+        # If result doesn't contain all nodes, there's a cycle
+        if len(result) != len(self.nodes)
+            return List[str]()
+        end
+        # Reverse: Kahn's gives prerequisite-first order, but our edges
+        # model "a depends on b" so we need dependencies-first order
+        return _reverse(result)
+    end
+end
+
+# ─── Helper: reverse a list of strings ───────────────────────────────
+
+def _reverse(lst: List[str]) -> List[str]
+    result: List[str] = List[str]()
+    i := len(lst) - 1
+    while i >= 0
+        append(result, lst[i])
+        i -= 1
+    end
+    return result
+end
+
+

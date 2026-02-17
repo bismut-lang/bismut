@@ -1,0 +1,197 @@
+# type_utils.mut — Shared type-string utilities
+#
+# Pure functions for type predicates, type decomposition, AST accessors,
+# and signature encoding. Used by both typecheck.mut and cg_types.mut.
+
+extern string
+extern stringbuilder
+
+import langtools.pars
+import parser as mp
+
+# ─── Constants ────────────────────────────────────────────────────────
+
+_CAST_TYPES := Dict[str, i64]() {
+    "i8": 1, "i16": 1, "i32": 1, "i64": 1,
+    "u8": 1, "u16": 1, "u32": 1, "u64": 1,
+    "f32": 1, "f64": 1
+}
+
+_PRIM_TAG := Dict[str, str]() {
+    "i64": "I64", "f64": "F64", "f32": "F32", "bool": "BOOL", "str": "STR",
+    "i8": "I8", "i16": "I16", "i32": "I32",
+    "u8": "U8", "u16": "U16", "u32": "U32", "u64": "U64"
+}
+
+def is_cast_type(name: str) -> bool
+    return has(_CAST_TYPES, name)
+end
+
+def has_prim_tag(name: str) -> bool
+    return has(_PRIM_TAG, name)
+end
+
+def prim_tag(name: str) -> str
+    return _PRIM_TAG[name]
+end
+
+# ─── Type predicates ──────────────────────────────────────────────────
+
+def is_list_type(ty: str) -> bool
+    if len(ty) < 6
+        return False
+    end
+    return ty[0] == 'L' and ty[1] == 'i' and ty[2] == 's' and ty[3] == 't' and ty[4] == '[' and ty[len(ty) - 1] == ']'
+end
+
+def is_dict_type(ty: str) -> bool
+    if len(ty) < 6
+        return False
+    end
+    return ty[0] == 'D' and ty[1] == 'i' and ty[2] == 'c' and ty[3] == 't' and ty[4] == '[' and ty[len(ty) - 1] == ']'
+end
+
+def is_fn_type(ty: str) -> bool
+    if len(ty) < 7
+        return False
+    end
+    return ty[0] == 'F' and ty[1] == 'n' and ty[2] == '(' and string.find(ty, ")->") >= 0
+end
+
+def is_tuple_type(ty: str) -> bool
+    if len(ty) < 5
+        return False
+    end
+    return ty[0] == '(' and ty[len(ty) - 1] == ')'
+end
+
+# ─── Type decomposers ────────────────────────────────────────────────
+
+def list_elem_type(ty: str) -> str
+    return string.substr(ty, 5, len(ty) - 6)
+end
+
+def dict_val_type(ty: str) -> str
+    inner := string.substr(ty, 5, len(ty) - 6)
+    parts := split_type_list(inner)
+    return parts[1]
+end
+
+def dict_key_type(ty: str) -> str
+    inner := string.substr(ty, 5, len(ty) - 6)
+    parts := split_type_list(inner)
+    return parts[0]
+end
+
+def dict_inner(ty: str) -> str
+    return string.substr(ty, 5, len(ty) - 6)
+end
+
+def fn_ret_type(ty: str) -> str
+    arrow := string.find(ty, ")->")
+    return string.substr(ty, arrow + 3, len(ty) - arrow - 3)
+end
+
+# ─── Depth-aware comma split ─────────────────────────────────────────
+
+def split_type_list(s: str) -> List[str]
+    if len(s) == 0
+        return List[str]()
+    end
+    parts: List[str] = List[str]()
+    depth: i64 = 0
+    start: i64 = 0
+    i: i64 = 0
+    while i < len(s)
+        c := s[i]
+        if c == '(' or c == '['
+            depth += 1
+        elif c == ')' or c == ']'
+            depth -= 1
+        elif c == ',' and depth == 0
+            append(parts, string.substr(s, start, i - start))
+            start = i + 1
+        end
+        i += 1
+    end
+    append(parts, string.substr(s, start, len(s) - start))
+    return parts
+end
+
+def tuple_elem_types(ty: str) -> List[str]
+    inner := string.substr(ty, 1, len(ty) - 2)
+    return split_type_list(inner)
+end
+
+def fn_param_types(ty: str) -> List[str]
+    arrow := string.find(ty, ")->")
+    inner := string.substr(ty, 3, arrow - 3)
+    return split_type_list(inner)
+end
+
+# ─── Signature encoding/decoding ─────────────────────────────────────
+
+def sig_params(sig: str) -> List[str]
+    pipe := string.find(sig, "|")
+    params_str := string.substr(sig, 0, pipe)
+    if len(params_str) == 0
+        return List[str]()
+    end
+    return split_type_list(params_str)
+end
+
+def sig_ret(sig: str) -> str
+    pipe := string.find(sig, "|")
+    return string.substr(sig, pipe + 1, len(sig) - pipe - 1)
+end
+
+# ─── AST node → type string ──────────────────────────────────────────
+
+def type_node_to_str(n: pars.Node) -> str
+    if n.kind == mp.NodeKind.TYPE
+        return n.value
+    end
+    if n.kind == mp.NodeKind.TYPE_LIST
+        return n.value
+    end
+    if n.kind == mp.NodeKind.TYPE_DICT
+        return n.value
+    end
+    if n.kind == mp.NodeKind.TYPE_FN
+        return n.value
+    end
+    if n.kind == mp.NodeKind.TYPE_TUPLE
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, "(")
+        i: i64 = 0
+        while i < n.child_count()
+            if i > 0
+                stringbuilder.append_str(sb, ",")
+            end
+            stringbuilder.append_str(sb, type_node_to_str(n.child(i)))
+            i += 1
+        end
+        stringbuilder.append_str(sb, ")")
+        return stringbuilder.build(sb)
+    end
+    return "???"
+end
+
+# ─── FUNC_DECL node accessors ────────────────────────────────────────
+
+def func_type_param_count(n: pars.Node) -> i64
+    return n.child_count() - 3
+end
+
+def func_params_block(n: pars.Node) -> pars.Node
+    return n.child(n.child_count() - 3)
+end
+
+def func_ret_type_str(n: pars.Node) -> str
+    ret_node := n.child(n.child_count() - 2)
+    return type_node_to_str(ret_node)
+end
+
+def func_body(n: pars.Node) -> pars.Node
+    return n.child(n.child_count() - 1)
+end

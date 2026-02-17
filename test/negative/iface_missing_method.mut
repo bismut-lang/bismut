@@ -1,0 +1,20 @@
+# Negative: class claims to implement interface but is missing a method
+
+interface IShape
+    def area(self) -> i64
+    def name(self) -> str
+end
+
+class Circle : IShape
+    r: i64
+
+    def init(self, r: i64)
+        self.r = r
+    end
+
+    def area(self) -> i64
+        return self.r * self.r * 3
+    end
+
+    # Missing: name() method
+end

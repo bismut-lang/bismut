@@ -1,0 +1,250 @@
+# test_import_resolver.mut -- Tests for the self-hosted import resolver
+#
+# EXPECTED:--- test 1: path utilities ---\npath_join: a/b\npath_dir: /foo/bar\npath_normalize: a/c\ndots_to_path: a/b/c.mut\nPASS\n--- test 2: type string renaming ---\nPASS\n--- test 3: extern resolution ---\nPASS\n--- test 4: import resolution ---\nPASS\n--- test 5: dotted expression resolution ---\nPASS\n--- test 6: mutlib parsing ---\nPASS\n--- done ---
+
+extern string
+extern stringbuilder
+extern filesystem
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+import import_resolver as ir
+import mutlib as ml
+import strutils as su
+import pathutils as pu
+
+# ─── Test 1: path utilities ──────────────────────────────────────────
+
+print("--- test 1: path utilities ---")
+
+print(format("path_join: {}", pu.path_join("a", "b")))
+print(format("path_dir: {}", pu.path_dir("/foo/bar/baz.txt")))
+print(format("path_normalize: {}", pu.path_normalize("a/b/../c")))
+print(format("dots_to_path: {}", ir._dots_to_path("a.b.c")))
+
+ok := True
+if pu.path_join("a", "b") != "a/b"
+    ok = False
+end
+if pu.path_join("a/", "b") != "a/b"
+    ok = False
+end
+if pu.path_join("", "b") != "b"
+    ok = False
+end
+if pu.path_dir("/foo/bar/baz.txt") != "/foo/bar"
+    ok = False
+end
+if pu.path_dir("foo.mut") != "."
+    ok = False
+end
+if pu.path_normalize("a/b/../c") != "a/c"
+    ok = False
+end
+if pu.path_normalize("a/./b") != "a/b"
+    ok = False
+end
+if ir._dots_to_path("a.b.c") != "a/b/c.mut"
+    ok = False
+end
+if ok
+    print("PASS")
+else
+    print("FAIL: path utility mismatch")
+end
+
+# ─── Test 2: type string renaming ────────────────────────────────────
+
+print("--- test 2: type string renaming ---")
+
+rmap: Dict[str, str] = Dict[str, str]()
+rmap["Foo"] = "mod__Foo"
+rmap["Bar"] = "mod__Bar"
+
+ok2 := True
+if ir._rename_type_str("Foo", rmap) != "mod__Foo"
+    print("FAIL: simple rename")
+    ok2 = False
+end
+if ir._rename_type_str("List[Foo]", rmap) != "List[mod__Foo]"
+    print("FAIL: List[Foo] rename")
+    ok2 = False
+end
+if ir._rename_type_str("Dict[str, Bar]", rmap) != "Dict[str, mod__Bar]"
+    print("FAIL: Dict[str, Bar] rename")
+    ok2 = False
+end
+if ir._rename_type_str("List[List[Foo]]", rmap) != "List[List[mod__Foo]]"
+    print("FAIL: nested List rename")
+    ok2 = False
+end
+if ir._rename_type_str("Fn(Foo,Bar)->Foo", rmap) != "Fn(mod__Foo,mod__Bar)->mod__Foo"
+    print("FAIL: Fn type rename")
+    ok2 = False
+end
+if ir._rename_type_str("i64", rmap) != "i64"
+    print("FAIL: i64 should not change")
+    ok2 = False
+end
+if ok2
+    print("PASS")
+end
+
+# ─── Test 3: extern resolution ───────────────────────────────────────
+
+print("--- test 3: extern resolution ---")
+
+# Parse a simple program with an extern declaration
+s3 := sink.Sink()
+src3 := "extern string\nx: str = string.concat(\"a\", \"b\")\n"
+prog3 := mp.parse("<test3>", src3, s3)
+if s3.has_errors()
+    print(format("PARSE ERROR: {}", s3.get(0).msg))
+else
+    # The compiler_dir should be the workspace root so it can find libs/
+    # We'll use a relative path that works from the project root
+    info3 := ir.resolve(prog3, "<test3>", ".", s3, List[str]())
+    if s3.has_errors()
+        print(format("RESOLVE ERROR: {}", s3.get(0).msg))
+    else
+        # After resolution, the program should have:
+        # 1. A synthetic func decl for string__concat
+        # 2. The dotted ref string.concat should be resolved to string__concat
+        found_concat := False
+        i: i64 = 0
+        while i < prog3.child_count()
+            c := prog3.child(i)
+            if c.kind == mp.NodeKind.FUNC_DECL and c.value == "string__concat"
+                found_concat = True
+            end
+            i += 1
+        end
+        if found_concat
+            print("PASS")
+        else
+            print("FAIL: string__concat not found after extern resolution")
+        end
+    end
+end
+
+# ─── Test 4: import resolution ───────────────────────────────────────
+
+print("--- test 4: import resolution ---")
+
+# Write a temporary module file
+filesystem.write("/tmp/_test_ir_mod.mut", "def helper() -> i64\n    return 42\nend\n")
+
+s4 := sink.Sink()
+src4 := "import _test_ir_mod as tm\nx := tm.helper()\n"
+prog4 := mp.parse("<test4>", src4, s4)
+if s4.has_errors()
+    print(format("PARSE ERROR: {}", s4.get(0).msg))
+else
+    info4 := ir.resolve(prog4, "/tmp/test4.mut", ".", s4, List[str]())
+    if s4.has_errors()
+        print(format("RESOLVE ERROR: {}", s4.get(0).msg))
+    else
+        # After resolution, should have tm__helper as a FUNC_DECL
+        found_helper := False
+        i: i64 = 0
+        while i < prog4.child_count()
+            c := prog4.child(i)
+            if c.kind == mp.NodeKind.FUNC_DECL and c.value == "tm__helper"
+                found_helper = True
+            end
+            i += 1
+        end
+        if found_helper
+            print("PASS")
+        else
+            print("FAIL: tm__helper not found after import resolution")
+        end
+    end
+end
+
+# ─── Test 5: dotted expression resolution ────────────────────────────
+
+print("--- test 5: dotted expression resolution ---")
+
+# Build a simple AST: MEMBER("func", [IDENT("mod")])
+# and verify it gets resolved to IDENT("mod__func")
+aliases5: Dict[str, i64] = Dict[str, i64]()
+aliases5["mod"] = 1
+
+ident_node := pars.Node(mp.NodeKind.IDENT, "mod", 1, 1)
+member_node := pars.Node(mp.NodeKind.MEMBER, "func", 1, 1)
+member_node.add_child(ident_node)
+
+# Wrap in a parent for the walker
+parent := pars.Node(mp.NodeKind.EXPR_STMT, "", 1, 1)
+parent.add_child(member_node)
+
+ir._walk_resolve(parent, aliases5)
+
+resolved := parent.child(0)
+ok5 := True
+if resolved.kind != mp.NodeKind.IDENT
+    print("FAIL: expected IDENT after resolution")
+    ok5 = False
+end
+if resolved.value != "mod__func"
+    print(format("FAIL: expected 'mod__func', got '{}'", resolved.value))
+    ok5 = False
+end
+if ok5
+    print("PASS")
+end
+
+# ─── Test 6: mutlib parsing ──────────────────────────────────────────
+
+print("--- test 6: mutlib parsing ---")
+
+# Write a temporary .mutlib file
+mutlib_content := "[types]\nWidget = widget_t\n\n[functions]\nnew_widget() -> Widget = c_new_widget\ndestroy(w: Widget) [dtor] = c_destroy_widget\nget_name(w: Widget) -> str = c_get_name\n\n[constants]\nMAX_WIDGETS: i64 = 100\n\n[flags]\nldflags = -lwidget\n"
+filesystem.write("/tmp/_test_ir.mutlib", mutlib_content)
+filesystem.write("/tmp/_test_ir.c", "// dummy")
+
+data := ml.parse_mutlib("/tmp/_test_ir.mutlib", "_test_ir", "/tmp", "")
+
+ok6 := True
+if len(data.types) != 1
+    print(format("FAIL: expected 1 type, got {}", len(data.types)))
+    ok6 = False
+elif data.types[0].bismut_name != "Widget"
+    print("FAIL: type name mismatch")
+    ok6 = False
+elif data.types[0].c_type != "widget_t"
+    print("FAIL: c_type mismatch")
+    ok6 = False
+elif data.types[0].c_dtor != "c_destroy_widget"
+    print("FAIL: c_dtor not linked")
+    ok6 = False
+end
+
+if len(data.funcs) != 3
+    print(format("FAIL: expected 3 funcs, got {}", len(data.funcs)))
+    ok6 = False
+end
+
+if len(data.consts) != 1
+    print(format("FAIL: expected 1 const, got {}", len(data.consts)))
+    ok6 = False
+elif data.consts[0].bismut_name != "MAX_WIDGETS"
+    print("FAIL: const name mismatch")
+    ok6 = False
+end
+
+if len(data.ldflags) != 1
+    print(format("FAIL: expected 1 ldflag, got {}", len(data.ldflags)))
+    ok6 = False
+elif data.ldflags[0] != "-lwidget"
+    print("FAIL: ldflag mismatch")
+    ok6 = False
+end
+
+if ok6
+    print("PASS")
+end
+
+print("--- done ---")

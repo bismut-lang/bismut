@@ -1,0 +1,178 @@
+# Test: Bismut parser (parser module)
+# Tokenizes and parses various Bismut source snippets and verifies AST structure.
+# EXPECTED:--- test 1: simple function ---\nPROGRAM\n  FUNC_DECL(add)\n    BLOCK(params)\n      PARAM(a)\n        TYPE(i64)\n      PARAM(b)\n        TYPE(i64)\n    TYPE(i64)\n    BLOCK\n      RETURN\n        BINARY(+)\n          IDENT(a)\n          IDENT(b)\n--- test 2: variable declarations ---\nPROGRAM\n  VAR_DECL(x)\n    TYPE(i64)\n    INT_LIT(10)\n  VAR_DECL(name)\n    TYPE(str)\n    STRING_LIT("hello")\n  VAR_DECL(n)\n    INT_LIT(42)\n--- test 3: class declaration ---\nPROGRAM\n  CLASS_DECL(Point)\n    FIELD_DECL(x)\n      TYPE(i64)\n    FIELD_DECL(y)\n      TYPE(i64)\n    FUNC_DECL(init)\n      BLOCK(params)\n        PARAM(self)\n          TYPE(Self)\n        PARAM(x)\n          TYPE(i64)\n        PARAM(y)\n          TYPE(i64)\n      TYPE(void)\n      BLOCK\n        MEMBER_ASSIGN(=)\n          MEMBER(x)\n            IDENT(self)\n          IDENT(x)\n        MEMBER_ASSIGN(=)\n          MEMBER(y)\n            IDENT(self)\n          IDENT(y)\n    FUNC_DECL(sum)\n      BLOCK(params)\n        PARAM(self)\n          TYPE(Self)\n      TYPE(i64)\n      BLOCK\n        RETURN\n          BINARY(+)\n            MEMBER(x)\n              IDENT(self)\n            MEMBER(y)\n              IDENT(self)\n--- test 4: if/elif/else ---\nPROGRAM\n  IF\n    IF_ARM(if)\n      BINARY(>)\n        IDENT(x)\n        INT_LIT(5)\n      BLOCK\n        EXPR_STMT\n          CALL\n            IDENT(print)\n            IDENT(x)\n    IF_ARM(elif)\n      BINARY(==)\n        IDENT(x)\n        INT_LIT(0)\n      BLOCK\n        EXPR_STMT\n          CALL\n            IDENT(print)\n            INT_LIT(0)\n    IF_ARM(else)\n      BLOCK\n        EXPR_STMT\n          CALL\n            IDENT(print)\n            UNARY(-)\n              INT_LIT(1)\n--- test 5: while loop ---\nPROGRAM\n  WHILE\n    BINARY(<)\n      IDENT(i)\n      INT_LIT(10)\n    BLOCK\n      ASSIGN(+=)\n        IDENT(i)\n        INT_LIT(1)\n--- test 6: for loop ---\nPROGRAM\n  FOR(i)\n    TYPE(i64)\n    CALL\n      IDENT(range)\n      INT_LIT(10)\n    BLOCK\n      EXPR_STMT\n        CALL\n          IDENT(print)\n          IDENT(i)\n--- test 7: enum ---\nPROGRAM\n  ENUM_DECL(Color)\n    ENUM_VARIANT(RED)\n    ENUM_VARIANT(GREEN)\n    ENUM_VARIANT(BLUE)\n--- test 8: interface ---\nPROGRAM\n  INTERFACE_DECL(IShape)\n    METHOD_SIG(area)\n      BLOCK(params)\n        PARAM(self)\n          TYPE(Self)\n      TYPE(f64)\n    METHOD_SIG(name)\n      BLOCK(params)\n        PARAM(self)\n          TYPE(Self)\n      TYPE(str)\n--- test 9: struct ---\nPROGRAM\n  STRUCT_DECL(Vec2)\n    FIELD_DECL(x)\n      TYPE(f64)\n    FIELD_DECL(y)\n      TYPE(f64)\n--- test 10: expressions ---\n10 subtests ok\n--- test 11: import and extern ---\nPROGRAM\n  EXTERN(string)\n    IDENT(string)\n  IMPORT(langtools.lex)\n    IDENT(lex)\n  IMPORT(langtools.mut_lex)\n    IDENT(mx)\n--- test 12: const and static ---\nPROGRAM\n  CONST_DECL(MAX)\n    TYPE(i64)\n    INT_LIT(100)\n  FUNC_DECL(counter)\n    BLOCK(params)\n    TYPE(i64)\n    BLOCK\n      STATIC_DECL(n)\n        TYPE(i64)\n        INT_LIT(0)\n      ASSIGN(+=)\n        IDENT(n)\n        INT_LIT(1)\n      RETURN\n        IDENT(n)\n--- test 13: complex program ---\nOK\n--- done ---
+
+import langtools.pars
+import langtools.sink
+import parser as mp
+
+s := sink.Sink()
+
+# ─── Test 1: simple function ─────────────────────────────────────────
+print("--- test 1: simple function ---")
+src1 := "def add(a: i64, b: i64) -> i64\n    return a + b\nend"
+ast1 := mp.parse("<t1>", src1, s)
+mp.dump_ast(ast1, 0)
+
+# ─── Test 2: variable declarations ───────────────────────────────────
+print("--- test 2: variable declarations ---")
+src2 := "x: i64 = 10\nname: str = \"hello\"\nn := 42"
+ast2 := mp.parse("<t2>", src2, s)
+mp.dump_ast(ast2, 0)
+
+# ─── Test 3: class declaration ───────────────────────────────────────
+print("--- test 3: class declaration ---")
+src3 := "class Point\n    x: i64\n    y: i64\n\n    def init(self, x: i64, y: i64)\n        self.x = x\n        self.y = y\n    end\n\n    def sum(self) -> i64\n        return self.x + self.y\n    end\nend"
+ast3 := mp.parse("<t3>", src3, s)
+mp.dump_ast(ast3, 0)
+
+# ─── Test 4: if/elif/else ────────────────────────────────────────────
+print("--- test 4: if/elif/else ---")
+src4 := "if x > 5\n    print(x)\nelif x == 0\n    print(0)\nelse\n    print(-1)\nend"
+ast4 := mp.parse("<t4>", src4, s)
+mp.dump_ast(ast4, 0)
+
+# ─── Test 5: while loop ──────────────────────────────────────────────
+print("--- test 5: while loop ---")
+src5 := "while i < 10\n    i += 1\nend"
+ast5 := mp.parse("<t5>", src5, s)
+mp.dump_ast(ast5, 0)
+
+# ─── Test 6: for loop ────────────────────────────────────────────────
+print("--- test 6: for loop ---")
+src6 := "for i:i64 in range(10)\n    print(i)\nend"
+ast6 := mp.parse("<t6>", src6, s)
+mp.dump_ast(ast6, 0)
+
+# ─── Test 7: enum ────────────────────────────────────────────────────
+print("--- test 7: enum ---")
+src7 := "enum Color\n    RED, GREEN, BLUE\nend"
+ast7 := mp.parse("<t7>", src7, s)
+mp.dump_ast(ast7, 0)
+
+# ─── Test 8: interface ───────────────────────────────────────────────
+print("--- test 8: interface ---")
+src8 := "interface IShape\n    def area(self) -> f64\n    def name(self) -> str\nend"
+ast8 := mp.parse("<t8>", src8, s)
+mp.dump_ast(ast8, 0)
+
+# ─── Test 9: struct ──────────────────────────────────────────────────
+print("--- test 9: struct ---")
+src9 := "struct Vec2\n    x: f64\n    y: f64\nend"
+ast9 := mp.parse("<t9>", src9, s)
+mp.dump_ast(ast9, 0)
+
+# ─── Test 10: expressions ────────────────────────────────────────────
+print("--- test 10: expressions ---")
+count: i64 = 0
+
+# Binary ops
+a10a := mp.parse("<t10a>", "x := 1 + 2 * 3", s)
+decl := a10a.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.BINARY
+    bin := decl.child(0)
+    if bin.value == "+" and bin.child(1).kind == mp.NodeKind.BINARY and bin.child(1).value == "*"
+        count += 1
+    end
+end
+
+# Unary
+a10b := mp.parse("<t10b>", "y := -x", s)
+decl = a10b.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.UNARY and decl.child(0).value == "-"
+    count += 1
+end
+
+# Member access
+a10c := mp.parse("<t10c>", "z := p.x", s)
+decl = a10c.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.MEMBER and decl.child(0).value == "x"
+    count += 1
+end
+
+# Function call
+a10d := mp.parse("<t10d>", "foo(1, 2)", s)
+stmt := a10d.child(0)
+if stmt.kind == mp.NodeKind.EXPR_STMT and stmt.child(0).kind == mp.NodeKind.CALL
+    call := stmt.child(0)
+    if call.child(0).value == "foo" and call.child_count() == 3
+        count += 1
+    end
+end
+
+# Subscript
+a10e := mp.parse("<t10e>", "a := lst[0]", s)
+decl = a10e.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.INDEX
+    count += 1
+end
+
+# Comparison chain
+a10f := mp.parse("<t10f>", "c := x > 5 and y < 10", s)
+decl = a10f.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.BINARY and decl.child(0).value == "and"
+    count += 1
+end
+
+# Boolean literal
+a10g := mp.parse("<t10g>", "b := True", s)
+decl = a10g.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.BOOL_LIT and decl.child(0).value == "True"
+    count += 1
+end
+
+# None literal
+a10h := mp.parse("<t10h>", "n := None", s)
+decl = a10h.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.NONE_LIT
+    count += 1
+end
+
+# String literal
+a10i := mp.parse("<t10i>", "s := \"hello\"", s)
+decl = a10i.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.STRING_LIT
+    count += 1
+end
+
+# Parenthesized expression
+a10j := mp.parse("<t10j>", "r := (1 + 2) * 3", s)
+decl = a10j.child(0)
+if decl.kind == mp.NodeKind.VAR_DECL and decl.child(0).kind == mp.NodeKind.BINARY and decl.child(0).value == "*"
+    # Left child should be BINARY(+) from parens
+    if decl.child(0).child(0).kind == mp.NodeKind.BINARY and decl.child(0).child(0).value == "+"
+        count += 1
+    end
+end
+
+print(format("{} subtests ok", count))
+
+# ─── Test 11: import and extern ──────────────────────────────────────
+print("--- test 11: import and extern ---")
+src11 := "extern string\nimport langtools.lex\nimport langtools.mut_lex as mx"
+ast11 := mp.parse("<t11>", src11, s)
+mp.dump_ast(ast11, 0)
+
+# ─── Test 12: const and static ───────────────────────────────────────
+print("--- test 12: const and static ---")
+src12 := "const MAX: i64 = 100\ndef counter() -> i64\n    static n: i64 = 0\n    n += 1\n    return n\nend"
+ast12 := mp.parse("<t12>", src12, s)
+mp.dump_ast(ast12, 0)
+
+# ─── Test 13: complex program (self-host test) ───────────────────────
+print("--- test 13: complex program ---")
+src13 := "extern string\nimport langtools.lex\n\nenum Color\n    RED, GREEN, BLUE\nend\n\ninterface IDrawable\n    def draw(self)\nend\n\nclass Circle : IDrawable\n    r: f64\n\n    def init(self, r: f64)\n        self.r = r\n    end\n\n    def draw(self)\n        print(\"circle\")\n    end\n\n    def area(self) -> f64\n        return self.r * self.r * 3.14\n    end\nend\n\ndef main()\n    c := Circle(5.0)\n    d: IDrawable = c\n    d.draw()\n    nums: List[i64] = List[i64]()\n    append(nums, 42)\n    i: i64 = 0\n    while i < len(nums)\n        if nums[i] > 10\n            print(nums[i])\n        end\n        i += 1\n    end\n    for j:i64 in range(3)\n        print(j)\n    end\nend"
+ast13 := mp.parse("<t13>", src13, s)
+if ast13.kind == mp.NodeKind.PROGRAM and not ast13.is_error()
+    # Check we got all the declarations
+    child_count := ast13.child_count()
+    if child_count >= 5
+        print("OK")
+    else
+        print(format("FAIL: expected >=5 children, got {}", child_count))
+    end
+else
+    print("FAIL: parse error")
+end
+
+print("--- done ---")

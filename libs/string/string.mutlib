@@ -1,0 +1,13 @@
+# string — string operations and type conversions
+
+[functions]
+concat(a: str, b: str) -> str = __clib__string_concat
+substr(s: str, start: i64, length: i64) -> str = __clib__string_substr
+find(s: str, sub: str) -> i64 = __clib__string_find
+chr(code: i64) -> str = __clib__string_chr
+char_at(s: str, idx: i64) -> i64 = __clib__string_char_at
+i64_to_str(n: i64) -> str = __clib__string_i64_to_str
+f64_to_str(n: f64) -> str = __clib__string_f64_to_str
+bool_to_str(b: bool) -> str = __clib__string_bool_to_str
+str_to_i64(s: str) -> i64 = __clib__string_str_to_i64
+str_to_f64(s: str) -> f64 = __clib__string_str_to_f64

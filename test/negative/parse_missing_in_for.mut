@@ -1,0 +1,4 @@
+# Negative: missing 'in' keyword in for loop
+for i:i64 range(10)
+    print(i)
+end

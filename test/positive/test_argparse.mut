@@ -1,0 +1,50 @@
+# Test argparse.mut — CLI argument parser
+# This test verifies argparse API without requiring CLI args from the runner.
+import langtools.argparse
+
+# Test 1: ArgParser and option definitions
+ap := argparse.ArgParser("testprog", "A test program")
+ap.add_flag("verbose", "v", "Enable verbose output")
+ap.add_flag("debug", "d", "Debug mode")
+ap.add_option("output", "o", "Output file", "out.c")
+ap.add_option("level", "O", "Opt level", "2")
+ap.add_positional("input", "Input file", False)
+ap.add_help()
+
+# Test 2: Parse with no CLI args (only argv[0] present) — should work since
+# nothing is required.
+args := ap.parse()
+
+# Test 3: Defaults
+print(args.get("output"))
+print(args.get("level"))
+print(args.get_i64("level"))
+print(args.flag("verbose"))
+print(args.flag("debug"))
+print(args.is_set("output"))
+print(args.is_set("verbose"))
+print(args.is_set("input"))
+print(args.positional_count())
+print(args.get_or("missing", "fallback"))
+
+# Test 4: Help text generation
+h := ap.help()
+# Just verify it's non-empty and contains the prog name
+if len(h) > 0
+    print("help-ok")
+end
+
+print("done")
+
+# expected: out.c
+# expected: 2
+# expected: 2
+# expected: false
+# expected: false
+# expected: true
+# expected: true
+# expected: false
+# expected: 0
+# expected: fallback
+# expected: help-ok
+# expected: done

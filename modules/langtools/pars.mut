@@ -1,0 +1,382 @@
+# pars.mut — General purpose Pratt parser toolkit for Bismut
+#
+# Provides:
+#   - Token class for parser input
+#   - Node class for AST output with factory functions
+#   - IParseRules interface for user-defined grammar
+#   - Parser class with Pratt expression parsing
+#
+# Usage:
+#   import langtools.pars
+#   tokens: List[pars.Token] = List[pars.Token]()
+#   append(tokens, pars.Token(TokenKind.INT, "42", 1, 1))
+#   p := pars.Parser("file", tokens, my_rules)
+#   ast := p.expr(0)
+
+extern string
+extern stringbuilder
+
+# ─── Token kinds ──────────────────────────────────────────────────────
+# Standard kinds shared with lex.mut by value (both start at 0).
+# Language-specific kinds start from TokenKind.USER (100).
+
+enum TokenKind
+    EOF, IDENT, INT, FLOAT, STRING, NEWLINE, ERROR, CHAR
+    USER = 100
+end
+
+# ─── Node kinds ───────────────────────────────────────────────────────
+# Common AST node kinds. Language-specific kinds start from USER (100).
+
+enum NodeKind
+    ERROR, LITERAL, IDENT, PREFIX, INFIX, POSTFIX, GROUP
+    USER = 100
+end
+
+# ─── Token ────────────────────────────────────────────────────────────
+
+class Token
+    kind: i64
+    lexeme: str
+    line: i64
+    col: i64
+
+    def init(self, kind: i64, lexeme: str, line: i64, col: i64)
+        self.kind = kind
+        self.lexeme = lexeme
+        self.line = line
+        self.col = col
+    end
+
+    def is_kind(self, k: i64) -> bool
+        return self.kind == k
+    end
+
+    def is_eof(self) -> bool
+        return self.kind == TokenKind.EOF
+    end
+
+    def is_error(self) -> bool
+        return self.kind == TokenKind.ERROR
+    end
+end
+
+# ─── AST Node ─────────────────────────────────────────────────────────
+
+class Node
+    kind: i64
+    value: str
+    ty: str
+    line: i64
+    col: i64
+    file: str
+    doc: str
+    children: List[Node]
+
+    def init(self, kind: i64, value: str, line: i64, col: i64)
+        self.kind = kind
+        self.value = value
+        self.line = line
+        self.col = col
+        self.file = ""
+        self.doc = ""
+        self.children = List[Node]()
+    end
+
+    def child(self, i: i64) -> Node
+        return self.children[i]
+    end
+
+    def child_count(self) -> i64
+        return len(self.children)
+    end
+
+    def add_child(self, c: Node)
+        append(self.children, c)
+    end
+
+    def is_kind(self, k: i64) -> bool
+        return self.kind == k
+    end
+
+    def is_error(self) -> bool
+        return self.kind == NodeKind.ERROR
+    end
+end
+
+# ─── Node factory functions ───────────────────────────────────────────
+
+def leaf(kind: i64, tok: Token) -> Node
+    return Node(kind, tok.lexeme, tok.line, tok.col)
+end
+
+def unary(kind: i64, tok: Token, operand: Node) -> Node
+    n := Node(kind, tok.lexeme, tok.line, tok.col)
+    append(n.children, operand)
+    return n
+end
+
+def binary(kind: i64, tok: Token, left: Node, right: Node) -> Node
+    n := Node(kind, tok.lexeme, tok.line, tok.col)
+    append(n.children, left)
+    append(n.children, right)
+    return n
+end
+
+def group(kind: i64, tok: Token, items: List[Node]) -> Node
+    n := Node(kind, tok.lexeme, tok.line, tok.col)
+    i: i64 = 0
+    while i < len(items)
+        append(n.children, items[i])
+        i += 1
+    end
+    return n
+end
+
+def error_node(tok: Token, msg: str) -> Node
+    return Node(NodeKind.ERROR, msg, tok.line, tok.col)
+end
+
+# ─── Node display ─────────────────────────────────────────────────────
+
+def node_to_str(n: Node) -> str
+    sb: stringbuilder.StringBuilder = stringbuilder.new()
+    stringbuilder.append_i64(sb, n.kind)
+    stringbuilder.append_str(sb, ":")
+    stringbuilder.append_str(sb, n.value)
+    if n.child_count() > 0
+        stringbuilder.append_str(sb, "[")
+        stringbuilder.append_i64(sb, n.child_count())
+        stringbuilder.append_str(sb, "]")
+    end
+    return stringbuilder.build(sb)
+end
+
+def dump_tree(n: Node, indent: i64)
+    sb: stringbuilder.StringBuilder = stringbuilder.new()
+    i: i64 = 0
+    while i < indent
+        stringbuilder.append_str(sb, "  ")
+        i += 1
+    end
+    stringbuilder.append_i64(sb, n.kind)
+    stringbuilder.append_str(sb, ":")
+    stringbuilder.append_str(sb, n.value)
+    print(stringbuilder.build(sb))
+    j: i64 = 0
+    while j < n.child_count()
+        dump_tree(n.child(j), indent + 1)
+        j += 1
+    end
+end
+
+# ─── Parse Rules Interface ────────────────────────────────────────────
+#
+# User implements this to define their language's grammar.
+#
+# nud (null denotation): called when a token appears at the start of an
+#   expression. Handles literals, identifiers, prefix operators, grouping.
+#
+# led (left denotation): called when a token appears after a left operand.
+#   Handles infix operators, postfix operators, function calls, indexing.
+#
+# lbp (left binding power): returns the precedence for a token kind when
+#   it appears in infix position. Higher values bind tighter. Return 0
+#   for tokens that are not infix operators.
+#
+# Right associativity: in the led handler, call p.expr(bp - 1) instead
+#   of p.expr(bp) for the right-hand operand.
+#
+# Postfix operators: implement in led without calling p.expr.
+#
+# Ternary (a ? b : c): implement in led — consume both operands and the
+#   middle delimiter.
+
+interface IParseRules
+    def nud(self, p: Parser, tok: Token) -> Node
+    def led(self, p: Parser, left: Node, tok: Token) -> Node
+    def lbp(self, kind: i64) -> i64
+    def has_nud(self, kind: i64) -> bool
+    def has_led(self, kind: i64) -> bool
+end
+
+# ─── Parser ───────────────────────────────────────────────────────────
+
+class Parser
+    tokens: List[Token]
+    pos: i64
+    length: i64
+    rules: IParseRules
+    file: str
+
+    def init(self, file: str, tokens: List[Token], rules: IParseRules)
+        self.file = file
+        self.tokens = tokens
+        self.pos = 0
+        self.length = len(tokens)
+        self.rules = rules
+    end
+
+    # ── Token access ──────────────────────────────────────────────
+
+    def current(self) -> Token
+        if self.pos >= self.length
+            return Token(TokenKind.EOF, "", 0, 0)
+        end
+        return self.tokens[self.pos]
+    end
+
+    def peek(self) -> i64
+        if self.pos >= self.length
+            return TokenKind.EOF
+        end
+        return self.tokens[self.pos].kind
+    end
+
+    def peek_at(self, offset: i64) -> i64
+        idx := self.pos + offset
+        if idx >= self.length
+            return TokenKind.EOF
+        end
+        return self.tokens[idx].kind
+    end
+
+    def at_end(self) -> bool
+        return self.pos >= self.length
+    end
+
+    def advance(self) -> Token
+        if self.pos >= self.length
+            return Token(TokenKind.EOF, "", 0, 0)
+        end
+        tok := self.tokens[self.pos]
+        self.pos += 1
+        return tok
+    end
+
+    def expect(self, kind: i64) -> Token
+        tok := self.current()
+        if tok.kind != kind
+            return Token(TokenKind.ERROR, format("expected token kind {}, got {}", kind, tok.kind), tok.line, tok.col)
+        end
+        self.pos += 1
+        return tok
+    end
+
+    def consume(self, kind: i64) -> bool
+        if self.pos < self.length and self.tokens[self.pos].kind == kind
+            self.pos += 1
+            return True
+        end
+        return False
+    end
+
+    def match_kind(self, kind: i64) -> bool
+        if self.pos < self.length
+            return self.tokens[self.pos].kind == kind
+        end
+        return False
+    end
+
+    # ── Skip utilities ────────────────────────────────────────────
+
+    def skip(self, kind: i64)
+        while self.pos < self.length and self.tokens[self.pos].kind == kind
+            self.pos += 1
+        end
+    end
+
+    def skip_while(self, predicate: Fn(i64) -> bool)
+        while self.pos < self.length and predicate(self.tokens[self.pos].kind)
+            self.pos += 1
+        end
+    end
+
+    # ── Pratt parsing core ────────────────────────────────────────
+
+    def expr(self, min_bp: i64) -> Node
+        tok := self.advance()
+        if tok.is_eof()
+            return error_node(tok, "unexpected end of input")
+        end
+        if not self.rules.has_nud(tok.kind)
+            return error_node(tok, format("unexpected token '{}'", tok.lexeme))
+        end
+        left := self.rules.nud(self, tok)
+        if left.is_error()
+            return left
+        end
+        while not self.at_end()
+            op_kind := self.peek()
+            if not self.rules.has_led(op_kind)
+                break
+            end
+            bp := self.rules.lbp(op_kind)
+            if bp <= min_bp
+                break
+            end
+            op := self.advance()
+            left = self.rules.led(self, left, op)
+            if left.is_error()
+                return left
+            end
+        end
+        return left
+    end
+
+    # ── Utility parsers ───────────────────────────────────────────
+
+    # Parse a delimited, separated list of expressions.
+    # Assumes the opening delimiter is already consumed.
+    # Consumes the closing delimiter on success.
+    def parse_list(self, close_kind: i64, sep_kind: i64, min_bp: i64) -> List[Node]
+        items: List[Node] = List[Node]()
+        if self.match_kind(close_kind)
+            self.advance()
+            return items
+        end
+        first := self.expr(min_bp)
+        append(items, first)
+        if first.is_error()
+            return items
+        end
+        while self.consume(sep_kind)
+            if self.match_kind(close_kind)
+                break
+            end
+            item := self.expr(min_bp)
+            append(items, item)
+            if item.is_error()
+                return items
+            end
+        end
+        if not self.consume(close_kind)
+            append(items, error_node(self.current(), format("expected closing token kind {}", close_kind)))
+        end
+        return items
+    end
+
+    # ── Save / restore ────────────────────────────────────────────
+
+    def save(self) -> i64
+        return self.pos
+    end
+
+    def restore(self, saved: i64)
+        self.pos = saved
+    end
+
+    # ── Error formatting ──────────────────────────────────────────
+
+    def format_error(self, tok: Token, msg: str) -> str
+        sb := stringbuilder.new()
+        stringbuilder.append_str(sb, self.file)
+        stringbuilder.append_str(sb, ":")
+        stringbuilder.append_i64(sb, tok.line)
+        stringbuilder.append_str(sb, ":")
+        stringbuilder.append_i64(sb, tok.col)
+        stringbuilder.append_str(sb, ": error: ")
+        stringbuilder.append_str(sb, msg)
+        return stringbuilder.build(sb)
+    end
+end

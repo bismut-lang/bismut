@@ -1,0 +1,150 @@
+# Test: break and continue properly release loop-scoped ref-type variables
+extern string
+
+# --- Test 1: break in while loop releases string ---
+def test_break_while_str()
+    i: i64 = 0
+    while True
+        s: str = "hello"
+        i += 1
+        if i == 3
+            break
+        end
+    end
+    print(i)
+end
+test_break_while_str()
+
+# --- Test 2: continue in while loop releases string ---
+def test_continue_while_str()
+    i: i64 = 0
+    count: i64 = 0
+    while i < 5
+        i += 1
+        s: str = "world"
+        if i % 2 == 0
+            continue
+        end
+        count += 1
+    end
+    print(count)
+end
+test_continue_while_str()
+
+# --- Test 3: break in while with class instance ---
+class Node
+    val: i64
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+def test_break_while_class()
+    i: i64 = 0
+    while True
+        n := Node(i)
+        i += 1
+        if i == 4
+            break
+        end
+    end
+    print(i)
+end
+test_break_while_class()
+
+# --- Test 4: continue in for loop releases string ---
+def test_continue_for_str()
+    nums: List[i64] = List[i64]()
+    append(nums, 1)
+    append(nums, 2)
+    append(nums, 3)
+    append(nums, 4)
+    append(nums, 5)
+    count: i64 = 0
+    for n:i64 in nums
+        s: str = "temp"
+        if n % 2 == 0
+            continue
+        end
+        count += 1
+    end
+    print(count)
+end
+test_continue_for_str()
+
+# --- Test 5: break in for loop releases class ---
+def test_break_for_class()
+    nums: List[i64] = List[i64]()
+    append(nums, 10)
+    append(nums, 20)
+    append(nums, 30)
+    result: i64 = 0
+    for n:i64 in nums
+        nd := Node(n)
+        if n == 20
+            break
+        end
+        result += nd.val
+    end
+    print(result)
+end
+test_break_for_class()
+
+# --- Test 6: break in nested if inside while ---
+def test_break_nested_if()
+    i: i64 = 0
+    while True
+        s1: str = "outer"
+        if True
+            s2: str = "inner"
+            if i >= 2
+                break
+            end
+        end
+        i += 1
+    end
+    print(i)
+end
+test_break_nested_if()
+
+# --- Test 7: break in while True with list ---
+def test_break_while_list()
+    i: i64 = 0
+    while True
+        items: List[str] = List[str]()
+        append(items, "a")
+        append(items, "b")
+        i += 1
+        if i == 3
+            break
+        end
+    end
+    print(i)
+end
+test_break_while_list()
+
+# --- Test 8: continue in for with ref-type loop variable ---
+def test_continue_for_ref_loop_var()
+    names: List[str] = List[str]()
+    append(names, "alice")
+    append(names, "bob")
+    append(names, "charlie")
+    count: i64 = 0
+    for name:str in names
+        if len(name) < 4
+            continue
+        end
+        count += 1
+    end
+    print(count)
+end
+test_continue_for_ref_loop_var()
+
+# EXPECTED:3
+# EXPECTED:3
+# EXPECTED:4
+# EXPECTED:3
+# EXPECTED:10
+# EXPECTED:2
+# EXPECTED:3
+# EXPECTED:2

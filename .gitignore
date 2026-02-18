@@ -5,6 +5,7 @@
 out.c
 bismut
 bismut.exe
+src/version.mut
 
 # Python artifacts
 __pycache__/

@@ -38,6 +38,9 @@ jobs:
         shell: bash
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
+      - name: Generate version module
+        run: bash tools/gen_version.sh
+
       - name: Bootstrap compiler (Python → C)
         run: python3 tools/reference-compiler/main.py src/main.mut
 
@@ -84,6 +87,9 @@ jobs:
       - name: Read version
         id: version
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate version module
+        run: bash tools/gen_version.sh
 
       - name: Bootstrap compiler (Python → C)
         run: python3 tools/reference-compiler/main.py src/main.mut

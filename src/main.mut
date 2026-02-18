@@ -28,8 +28,7 @@ import codegen as gen_mod
 import analyzer as az
 import strutils as su
 import pathutils as pu
-
-const VERSION: str = "0.1.0"
+import version as ver
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -425,7 +424,7 @@ end
 
 cli := ap.ArgParser("bismut", "Bismut compiler")
 cli.add_help()
-cli.add_version(format("bismut {}", VERSION))
+cli.add_version(format("bismut {}", ver.VERSION))
 
 build_cmd := cli.add_command("build", "Compile to native binary")
 build_cmd.add_positional("file", "Source .mut file", True)

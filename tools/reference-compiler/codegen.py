@@ -334,10 +334,11 @@ class VarInfo:
 
 
 class CodeGen:
-    def __init__(self):
+    def __init__(self, debug_leaks: bool = False):
         self.out: List[str] = []
         self.ind = 0
         self.tmp = 0
+        self.debug_leaks = debug_leaks
 
         self.env: List[Dict[str, VarInfo]] = []
         self.scope_vars: List[List[VarInfo]] = []
@@ -780,6 +781,8 @@ class CodeGen:
     # -------------------------
 
     def _emit_prelude(self) -> None:
+        if self.debug_leaks:
+            self.w('#define __LANG_RT_DEBUG_LEAKS')
         self.w('#if !defined(_WIN32) && !defined(__APPLE__)')
         self.w('  #define _POSIX_C_SOURCE 199309L')
         self.w('#endif')
@@ -1071,6 +1074,7 @@ class CodeGen:
         self.w(f"__lang_rt_Class_{name}* self = (__lang_rt_Class_{name}*)obj;")
         if c_dtor:
             self.w(f"if (self->ptr) {c_dtor}(self->ptr);")
+        self.w("__LANG_RT_LEAK_UNTRACK(self);")
         self.w("free(self);")
         self.ind -= 1
         self.w("}")
@@ -1086,6 +1090,7 @@ class CodeGen:
         self.ind += 1
         self.w(f"__lang_rt_Class_{name}* obj = (__lang_rt_Class_{name}*)malloc(sizeof(__lang_rt_Class_{name}));")
         self.w("__lang_rt_rc_init(&obj->rc);")
+        self.w(f'__LANG_RT_LEAK_TRACK(obj, "{name}", NULL, 0, 0);')
         self.w("obj->ptr = ptr;")
         self.w("return obj;")
         self.ind -= 1
@@ -1116,6 +1121,7 @@ class CodeGen:
                     self.w(f"if (self->{_ci(fd.name)}.obj) self->{_ci(fd.name)}.vtbl->release(self->{_ci(fd.name)}.obj);")
                 elif fd.ty.name in self.class_defs:
                     self.w(f"if (self->{_ci(fd.name)}) __lang_rt_class_{fd.ty.name}_release(self->{_ci(fd.name)});")
+        self.w("__LANG_RT_LEAK_UNTRACK(self);")
         self.w("free(self);")
         self.ind -= 1
         self.w("}")
@@ -1138,6 +1144,7 @@ class CodeGen:
         self.ind += 1
         self.w(f"__lang_rt_Class_{name}* self = (__lang_rt_Class_{name}*)__lang_rt_malloc(__lang_rt__src, sizeof(__lang_rt_Class_{name}));")
         self.w("__lang_rt_rc_init(&self->rc);")
+        self.w(f'__LANG_RT_LEAK_TRACK(self, "{name}", __lang_rt__src.file, __lang_rt__src.line, __lang_rt__src.col);')
         # Zero-init all fields
         for fd in cls.fields:
             if fd.ty.name in self.iface_defs:
@@ -2415,5 +2422,5 @@ class CodeGen:
         self.w("}")
 
 
-def generate_c(prog: Program) -> str:
-    return CodeGen().generate(prog)
+def generate_c(prog: Program, debug_leaks: bool = False) -> str:
+    return CodeGen(debug_leaks=debug_leaks).generate(prog)

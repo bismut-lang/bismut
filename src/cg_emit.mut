@@ -19,6 +19,9 @@ import cg_state as cs
 # ─── Prelude ─────────────────────────────────────────────────────────
 
 def emit_prelude(cg: cs.CodeGen)
+    if cg.debug_leaks
+        cg.w("#define __LANG_RT_DEBUG_LEAKS")
+    end
     cg.w("#if !defined(_WIN32) && !defined(__APPLE__)")
     cg.w("  #define _POSIX_C_SOURCE 199309L")
     cg.w("#endif")

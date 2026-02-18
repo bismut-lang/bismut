@@ -454,6 +454,8 @@ def _check_circular_refs()
                     while k < len(refs)
                         if refs[k] != cls_name
                             g.add_edge(cls_name, refs[k])
+                        else
+                            _sink.note(_file, ch.line, ch.col, 0, format("class '{}' has self-referential field '{}' -- cyclic links will leak memory (leak detector is enabled in debug builds)", cls_name, ch.value))
                         end
                         k += 1
                     end

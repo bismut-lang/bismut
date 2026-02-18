@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -538,6 +539,7 @@ class TypeChecker:
             for fd in cls.fields:
                 for target in _extract_class_refs(fd.ty.name):
                     if target == cls.name:
+                        print(f"{fd.loc.file}:{fd.loc.line}:{fd.loc.col}: note: class '{cls.name}' has self-referential field '{fd.name}' -- cyclic links will leak memory (leak detector is enabled in debug builds)", file=sys.stderr)
                         continue
                     adj[cls.name].add(target)
                     locs[target] = fd.loc

@@ -26,7 +26,7 @@ else
         end
     else
         ext := ir.ExternInfo()
-        result := gen_mod.generate_c(prog, "<test>", ext, False)
+        result := gen_mod.generate_c(prog, "<test>", ext, False, False)
         print(result)
     end
 end

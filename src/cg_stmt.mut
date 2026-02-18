@@ -718,6 +718,7 @@ def emit_class_methods(cg: cs.CodeGen, cls: pars.Node)
         end
         i += 1
     end
+    cg.w("__LANG_RT_LEAK_UNTRACK(self);")
     cg.w("free(self);")
     cg.ind -= 1
     cg.w("}")
@@ -765,6 +766,7 @@ def emit_class_methods(cg: cs.CodeGen, cls: pars.Node)
     cg.ind += 1
     cg.w(format("__lang_rt_Class_{}* self = (__lang_rt_Class_{}*)__lang_rt_malloc(__lang_rt__src, sizeof(__lang_rt_Class_{}));", name, name, name))
     cg.w("__lang_rt_rc_init(&self->rc);")
+    cg.w(format("__LANG_RT_LEAK_TRACK(self, \"{}\", __lang_rt__src.file, __lang_rt__src.line, __lang_rt__src.col);", name))
 
     # Zero-init all fields
     i = 0
@@ -904,6 +906,7 @@ def emit_extern_type_methods(cg: cs.CodeGen, cls: pars.Node)
     if len(c_dtor) > 0
         cg.w(format("if (self->ptr) {}(self->ptr);", c_dtor))
     end
+    cg.w("__LANG_RT_LEAK_UNTRACK(self);")
     cg.w("free(self);")
     cg.ind -= 1
     cg.w("}")
@@ -919,6 +922,7 @@ def emit_extern_type_methods(cg: cs.CodeGen, cls: pars.Node)
     cg.ind += 1
     cg.w(format("__lang_rt_Class_{}* obj = (__lang_rt_Class_{}*)malloc(sizeof(__lang_rt_Class_{}));", name, name, name))
     cg.w("__lang_rt_rc_init(&obj->rc);")
+    cg.w(format("__LANG_RT_LEAK_TRACK(obj, \"{}\", NULL, 0, 0);", name))
     cg.w("obj->ptr = ptr;")
     cg.w("return obj;")
     cg.ind -= 1

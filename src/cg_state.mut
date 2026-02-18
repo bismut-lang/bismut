@@ -82,6 +82,9 @@ class CodeGen
     # Emit #line directives for source-level debugging
     debug_lines: bool
 
+    # Emit leak detection tracking code
+    debug_leaks: bool
+
     # Current statement source location for #line emission
     cur_debug_line: i64
     cur_debug_file: str
@@ -116,6 +119,7 @@ class CodeGen
         self.string_lit_insert_pos = 0
         self.file = ""
         self.debug_lines = False
+        self.debug_leaks = False
         self.cur_debug_line = 0
         self.cur_debug_file = ""
         self.func_global_refs = Dict[str, i64]()

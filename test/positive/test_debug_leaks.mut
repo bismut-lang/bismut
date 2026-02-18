@@ -1,0 +1,32 @@
+# Test: debug leak detector
+# Build with --debug-leaks to see leak report
+
+class Node
+    val: i64
+    next: Node
+
+    def init(self, val: i64)
+        self.val = val
+    end
+end
+
+class Box
+    x: i64
+
+    def init(self, x: i64)
+        self.x = x
+    end
+end
+
+# Non-leaking: Box goes out of scope normally
+b := Box(42)
+print(b.x)
+
+# Leaking: create a cycle
+a := Node(1)
+c := Node(2)
+a.next = c
+c.next = a
+
+print(a.val)
+print(c.val)

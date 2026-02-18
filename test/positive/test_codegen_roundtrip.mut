@@ -38,7 +38,7 @@ def gen(src: str, name: str) -> str
         return ""
     end
     ext := ir.ExternInfo()
-    return gen_mod.generate_c(prog, name, ext, False)
+    return gen_mod.generate_c(prog, name, ext, False, False)
 end
 
 # Run generated C: write to file, compile, run, return output

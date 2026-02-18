@@ -581,7 +581,7 @@ end
 
 # ─── Main entry point ───────────────────────────────────────────────
 
-def generate_c(prog: pars.Node, file: str, extern_info: ir.ExternInfo, debug_lines: bool) -> str
+def generate_c(prog: pars.Node, file: str, extern_info: ir.ExternInfo, debug_lines: bool, debug_leaks: bool) -> str
     # Clear global type registries
     ct.clear_registries()
 
@@ -589,6 +589,7 @@ def generate_c(prog: pars.Node, file: str, extern_info: ir.ExternInfo, debug_lin
     cg.file = file
     cg.extern_info = extern_info
     cg.debug_lines = debug_lines
+    cg.debug_leaks = debug_leaks
 
     # Register all types
     _register_types(cg, prog)

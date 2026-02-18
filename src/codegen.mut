@@ -689,6 +689,26 @@ def generate_c(prog: pars.Node, file: str, extern_info: ir.ExternInfo, debug_lin
     _emit_global_vars(cg, prog)
     cg.global_scope_depth = len(cg.scope_vars)
 
+    # Forward declarations for vtable instances (class methods may reference them)
+    i = 0
+    while i < prog.child_count()
+        ch := prog.child(i)
+        if ch.kind == mp.NodeKind.CLASS_DECL and has(cg.class_implements, ch.value)
+            impl_str := cg.class_implements[ch.value]
+            if len(impl_str) > 0
+                inames := su.split(impl_str, ",")
+                j: i64 = 0
+                while j < len(inames)
+                    iname := inames[j]
+                    cg.w(format("static __lang_rt_Vtbl_{} __lang_rt_vtbl_{}_as_{};", iname, ch.value, iname))
+                    j += 1
+                end
+            end
+        end
+        i += 1
+    end
+    cg.w_empty()
+
     # Class methods (constructor, destructor, retain/release, user methods)
     i = 0
     while i < prog.child_count()

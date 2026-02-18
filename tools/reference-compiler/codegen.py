@@ -608,6 +608,12 @@ class CodeGen:
         # Mark global scope depth so functions don't release globals
         self._global_scope_depth = len(self.scope_vars)
 
+        # Forward declarations for vtable instances (class methods may reference them)
+        for cls in prog.classes:
+            for iname in cls.implements:
+                self.w(f"static __lang_rt_Vtbl_{iname} __lang_rt_vtbl_{cls.name}_as_{iname};")
+        self.w("")
+
         # Class methods (constructor, destructor, retain/release, user methods)
         for cls in prog.classes:
             self._emit_class_methods(cls)

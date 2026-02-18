@@ -207,7 +207,7 @@ class ArgParser
     end
 
     def add_version(self, version_str: str)
-        self.add_flag("version", "V", "Show version")
+        self.add_flag("version", "v", "Show version")
         self._version_str = version_str
     end
 
@@ -237,6 +237,10 @@ class ArgParser
 
     def help(self) -> str
         sb := stringbuilder.new()
+        if len(self._version_str) > 0
+            stringbuilder.append_str(sb, self._version_str)
+            stringbuilder.append_str(sb, " -- ")
+        end
         stringbuilder.append_str(sb, self.desc)
 
         if self.has_commands()
@@ -261,6 +265,8 @@ class ArgParser
                 stringbuilder.append_str(sb, "\n")
                 i += 1
             end
+
+            _append_options_section(sb, self.defs)
 
             stringbuilder.append_str(sb, "\nUse '")
             stringbuilder.append_str(sb, self.prog)
@@ -292,7 +298,7 @@ def _parse_with_commands(ap: ArgParser) -> ParsedArgs
             return result
         end
         if len(ap._version_str) > 0
-            if first == "--version" or first == "-V"
+            if first == "--version" or first == "-v"
                 print(ap._version_str)
                 os.exit(0)
             end
@@ -300,9 +306,8 @@ def _parse_with_commands(ap: ArgParser) -> ParsedArgs
     end
 
     if os.argc() < 2
-        print(format("{}: error: expected a command", ap.prog))
-        print(format("Try '{} --help' for more information.", ap.prog))
-        os.exit(1)
+        print(ap.help())
+        os.exit(0)
     end
 
     cmd_name := os.argv(1)

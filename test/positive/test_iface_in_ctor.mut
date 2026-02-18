@@ -1,0 +1,67 @@
+# Test: interface vtable referenced inside a class constructor
+#
+# Verifies that a class can create an object implementing an interface
+# and store it in an interface-typed field during init. This requires
+# the vtable forward declaration to exist before class methods are emitted.
+
+interface IGreeter
+    def greet(self) -> str
+end
+
+class Hello : IGreeter
+    def init(self)
+    end
+
+    def greet(self) -> str
+        return "hello"
+    end
+end
+
+class World : IGreeter
+    def init(self)
+    end
+
+    def greet(self) -> str
+        return "world"
+    end
+end
+
+# A class whose constructor assigns an interface-typed field
+class App
+    g: IGreeter
+
+    def init(self)
+        self.g = Hello()
+    end
+
+    def run(self) -> str
+        return self.g.greet()
+    end
+end
+
+# A class that takes an interface parameter and stores it
+class Wrapper
+    g: IGreeter
+
+    def init(self, g: IGreeter)
+        self.g = g
+    end
+
+    def run(self) -> str
+        return self.g.greet()
+    end
+end
+
+a := App()
+print(a.run())
+
+a.g = World()
+print(a.run())
+
+w := Wrapper(Hello())
+print(w.run())
+
+# --- expected output ---
+# hello
+# world
+# hello

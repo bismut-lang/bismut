@@ -1,6 +1,6 @@
 /*
  * tcc — C implementation for the tcc Bismut extern library.
- * Embedded TCC compiler via libtcc. Linux/Windows only.
+ * Embedded TCC compiler via libtcc. Linux/macOS/Windows.
  * Uses runtime headers already included in out.c.
  */
 

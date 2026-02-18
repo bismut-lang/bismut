@@ -23,8 +23,8 @@ jobs:
             binary: bismut
             archive: tar.gz
             cc: gcc-14
-            extra_cflags: ""
-            extra_ldflags: -lm
+            extra_cflags: -Ilibs/tcc/macos
+            extra_ldflags: -Llibs/tcc/macos -ltcc -lm
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +40,10 @@ jobs:
 
       - name: Bootstrap compiler (Python → C)
         run: python3 tools/reference-compiler/main.py src/main.mut
+
+      - name: Build libtcc for macOS
+        if: matrix.platform == 'macos'
+        run: bash libs/tcc/build-macos.sh
 
       - name: Compile native binary
         run: ${{ matrix.cc }} -O2 -std=c99 -Irt ${{ matrix.extra_cflags }} -o ${{ matrix.binary }} out.c ${{ matrix.extra_ldflags }}

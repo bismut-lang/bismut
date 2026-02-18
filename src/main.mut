@@ -11,6 +11,8 @@ extern filesystem
 extern os
 @if __LINUX__
 extern tcc
+@elif __MACOS__
+extern tcc
 @elif __WIN__
 extern tcc
 @end
@@ -133,7 +135,7 @@ def _build_cc_cmd(cc: str, c_file: str, out_name: str, release: bool, compiler_d
     return stringbuilder.build(sb)
 end
 
-# ─── TCC in-process compilation (Linux / Windows) ────────────────────
+# ─── TCC in-process compilation (Linux / macOS / Windows) ────────────
 
 @if __LINUX__
 def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, ext: ir.ExternInfo)
@@ -142,6 +144,45 @@ def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, e
 
     # Point TCC at its bundled headers and runtime
     tcc.set_lib_path(state, pu.path_join(compiler_dir, "libs/tcc/linux"))
+
+    if release
+        tcc.set_options(state, "-O2")
+    end
+    tcc.set_options(state, "-std=c99")
+    tcc.add_include_path(state, pu.path_join(compiler_dir, "rt"))
+
+    i: i64 = 0
+    while i < len(ext.cflags)
+        tcc.set_options(state, ext.cflags[i])
+        i += 1
+    end
+
+    rc := tcc.compile_string(state, c_code)
+    if rc == -1
+        print("error: tcc compilation failed")
+        os.exit(1)
+    end
+
+    tcc.add_library(state, "m")
+    i = 0
+    while i < len(ext.ldflags)
+        tcc.set_options(state, ext.ldflags[i])
+        i += 1
+    end
+
+    rc = tcc.output_file(state, out_name)
+    if rc == -1
+        print("error: tcc failed to write output")
+        os.exit(1)
+    end
+end
+@elif __MACOS__
+def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, ext: ir.ExternInfo)
+    state := tcc.new()
+    tcc.set_output_exe(state)
+
+    # Point TCC at its bundled headers and runtime
+    tcc.set_lib_path(state, pu.path_join(compiler_dir, "libs/tcc/macos"))
 
     if release
         tcc.set_options(state, "-O2")
@@ -288,6 +329,8 @@ def _cmd_build(args: ap.ParsedArgs, compiler_dir: str)
 
     @if __LINUX__
     use_tcc := args.flag("tcc")
+    @elif __MACOS__
+    use_tcc := args.flag("tcc")
     @elif __WIN__
     use_tcc := args.flag("tcc")
     @else
@@ -296,6 +339,8 @@ def _cmd_build(args: ap.ParsedArgs, compiler_dir: str)
 
     if use_tcc
         @if __LINUX__
+        _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+        @elif __MACOS__
         _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
         @elif __WIN__
         _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
@@ -313,6 +358,9 @@ def _cmd_build(args: ap.ParsedArgs, compiler_dir: str)
         else
             @if __LINUX__
             print("note: gcc not found, using embedded tcc (binaries may be 2-3x slower)")
+            _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+            @elif __MACOS__
+            print("note: no C compiler found, using embedded tcc (binaries may be 2-3x slower)")
             _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
             @elif __WIN__
             print("note: gcc not found, using embedded tcc (binaries may be 2-3x slower)")
@@ -338,21 +386,10 @@ def _cmd_run(args: ap.ParsedArgs, compiler_dir: str)
 
     @if __LINUX__
     _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
+    @elif __MACOS__
+    _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
     @elif __WIN__
     _tcc_compile(result.c_code, out_name, release, compiler_dir, result.extern_info)
-    @else
-    # MACOS builtin tcc not supported right now
-    cc := _find_cc("")
-    if len(cc) == 0
-        print("error: no C compiler found. Install gcc or clang.")
-        os.exit(1)
-    end
-    filesystem.write("out.c", result.c_code)
-    rc := os.exec(_build_cc_cmd(cc, "out.c", out_name, release, compiler_dir, result.extern_info))
-    if rc != 0
-        print(format("error: {} exited with code {}", cc, rc))
-        os.exit(1)
-    end
     @end
 
     sb := stringbuilder.new()

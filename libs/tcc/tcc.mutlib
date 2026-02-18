@@ -4,19 +4,21 @@
 TccState = TCCState
 
 [functions]
-new() -> TccState = __clib__tcc_new
-destroy(state: TccState) [dtor] = __clib__tcc_destroy
-set_output_exe(state: TccState) -> i64 = __clib__tcc_set_output_exe
-set_options(state: TccState, opts: str) -> void = __clib__tcc_set_options
+new() -> TccState                                   = __clib__tcc_new
+destroy(state: TccState) [dtor]                     = __clib__tcc_destroy
+set_output_exe(state: TccState) -> i64              = __clib__tcc_set_output_exe
+set_options(state: TccState, opts: str) -> void     = __clib__tcc_set_options
 add_include_path(state: TccState, path: str) -> i64 = __clib__tcc_add_include_path
 add_library_path(state: TccState, path: str) -> i64 = __clib__tcc_add_library_path
-add_library(state: TccState, name: str) -> i64 = __clib__tcc_add_library
-compile_string(state: TccState, code: str) -> i64 = __clib__tcc_compile_string
-output_file(state: TccState, filename: str) -> i64 = __clib__tcc_output_file
-set_lib_path(state: TccState, path: str) -> void = __clib__tcc_set_lib_path
+add_library(state: TccState, name: str) -> i64      = __clib__tcc_add_library
+compile_string(state: TccState, code: str) -> i64   = __clib__tcc_compile_string
+output_file(state: TccState, filename: str) -> i64  = __clib__tcc_output_file
+set_lib_path(state: TccState, path: str) -> void    = __clib__tcc_set_lib_path
 
 [flags]
-cflags_linux = -I{LIB_DIR}/linux
+cflags_linux  = -I{LIB_DIR}/linux
 ldflags_linux = -L{LIB_DIR}/linux -ltcc -ldl
-cflags_win = -I{LIB_DIR}/win
-ldflags_win = -L{LIB_DIR}/win -ltcc
+cflags_macos  = -I{LIB_DIR}/macos
+ldflags_macos = -L{LIB_DIR}/macos -ltcc
+cflags_win    = -I{LIB_DIR}/win
+ldflags_win   = -L{LIB_DIR}/win -ltcc

@@ -3,16 +3,16 @@ Buffer = __clib__buffer_Buffer
 
 [functions]
 # Constructor
-new() -> Buffer = __clib__buffer_new
+new() -> Buffer            = __clib__buffer_new
 from_str(s: str) -> Buffer = __clib__buffer_from_str
 
 # Destructor
 destroy(buf: Buffer) [dtor] = __clib__buffer_destroy
 
 # Write: single byte / raw bytes
-write_byte(buf: Buffer, val: i64) -> void = __clib__buffer_write_byte
+write_byte(buf: Buffer, val: i64) -> void   = __clib__buffer_write_byte
 write_bytes(buf: Buffer, data: str) -> void = __clib__buffer_write_bytes
-write_str_zt(buf: Buffer, s: str) -> void = __clib__buffer_write_str_zt
+write_str_zt(buf: Buffer, s: str) -> void   = __clib__buffer_write_str_zt
 
 # Write: integers — little endian
 write_i16_le(buf: Buffer, val: i64) -> void = __clib__buffer_write_i16_le
@@ -31,8 +31,8 @@ write_f64_le(buf: Buffer, val: f64) -> void = __clib__buffer_write_f64_le
 write_f64_be(buf: Buffer, val: f64) -> void = __clib__buffer_write_f64_be
 
 # Read: single byte
-read_u8(buf: Buffer) -> i64 = __clib__buffer_read_u8
-read_i8(buf: Buffer) -> i64 = __clib__buffer_read_i8
+read_u8(buf: Buffer) -> i64            = __clib__buffer_read_u8
+read_i8(buf: Buffer) -> i64            = __clib__buffer_read_i8
 read_bytes(buf: Buffer, n: i64) -> str = __clib__buffer_read_bytes
 read_str_zt(buf: Buffer) -> str = __clib__buffer_read_str_zt
 
@@ -61,12 +61,12 @@ read_f64_le(buf: Buffer) -> f64 = __clib__buffer_read_f64_le
 read_f64_be(buf: Buffer) -> f64 = __clib__buffer_read_f64_be
 
 # Utility
-length(buf: Buffer) -> i64 = __clib__buffer_length
-capacity(buf: Buffer) -> i64 = __clib__buffer_capacity
-pos(buf: Buffer) -> i64 = __clib__buffer_pos
+length(buf: Buffer) -> i64    = __clib__buffer_length
+capacity(buf: Buffer) -> i64  = __clib__buffer_capacity
+pos(buf: Buffer) -> i64       = __clib__buffer_pos
 remaining(buf: Buffer) -> i64 = __clib__buffer_remaining
+reset(buf: Buffer) -> void    = __clib__buffer_reset
+clear(buf: Buffer) -> void    = __clib__buffer_clear
+to_str(buf: Buffer) -> str    = __clib__buffer_to_str
 seek(buf: Buffer, pos: i64) -> void = __clib__buffer_seek
-reset(buf: Buffer) -> void = __clib__buffer_reset
-clear(buf: Buffer) -> void = __clib__buffer_clear
-to_str(buf: Buffer) -> str = __clib__buffer_to_str
 slice(buf: Buffer, start: i64, n: i64) -> str = __clib__buffer_slice

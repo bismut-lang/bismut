@@ -1,8 +1,8 @@
 # filesystem — file system operations
 
 [functions]
-read(path: str) -> str = __clib__filesystem_read
-write(path: str, content: str) = __clib__filesystem_write
+read(path: str) -> str          = __clib__filesystem_read
+write(path: str, content: str)  = __clib__filesystem_write
 append(path: str, content: str) = __clib__filesystem_append
-exists(path: str) -> bool = __clib__filesystem_exists
-dir_exists(path: str) -> bool = __clib__filesystem_dir_exists
+exists(path: str) -> bool       = __clib__filesystem_exists
+dir_exists(path: str) -> bool   = __clib__filesystem_dir_exists

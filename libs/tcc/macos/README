@@ -1,0 +1,2 @@
+This directory is populated by build-macos.sh or by the CI workflow.
+Run `bash libs/tcc/build-macos.sh` on a macOS machine to build libtcc.

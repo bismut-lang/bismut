@@ -427,6 +427,11 @@ end
 def _check_circular_refs()
     g := graph.Graph()
 
+    # Track field locations: "ClassName->TargetName" -> (line, col, field_name)
+    edge_lines: Dict[str, i64] = Dict[str, i64]()
+    edge_cols: Dict[str, i64] = Dict[str, i64]()
+    edge_fields: Dict[str, str] = Dict[str, str]()
+
     # Register all class nodes
     i: i64 = 0
     while i < _prog.child_count()
@@ -454,8 +459,10 @@ def _check_circular_refs()
                     while k < len(refs)
                         if refs[k] != cls_name
                             g.add_edge(cls_name, refs[k])
-                        else
-                            _sink.note(_file, ch.line, ch.col, 0, format("class '{}' has self-referential field '{}' -- cyclic links will leak memory (leak detector is enabled in debug builds)", cls_name, ch.value))
+                            edge_key := format("{}->{}", cls_name, refs[k])
+                            edge_lines[edge_key] = ch.line
+                            edge_cols[edge_key] = ch.col
+                            edge_fields[edge_key] = ch.value
                         end
                         k += 1
                     end
@@ -468,8 +475,37 @@ def _check_circular_refs()
 
     cycle := g.find_cycle()
     if len(cycle) > 0
-        path := strutils.join(cycle, " -> ")
-        _error(1, 1, format("circular class reference detected: {}. Classes cannot reference each other in a cycle, including through List or Dict fields", path))
+        # Append first node to close the cycle for display: A -> B -> A
+        closed: List[str] = List[str]()
+        ci: i64 = 0
+        while ci < len(cycle)
+            append(closed, cycle[ci])
+            ci += 1
+        end
+        append(closed, cycle[0])
+        path := strutils.join(closed, " -> ")
+        # Find field location for first edge in cycle
+        first_key := format("{}->{}", cycle[0], cycle[1])
+        line: i64 = 1
+        col: i64 = 1
+        field_name := ""
+        if has(edge_lines, first_key)
+            line = edge_lines[first_key]
+            col = edge_cols[first_key]
+            field_name = edge_fields[first_key]
+        end
+        _sink.note(_file, line, col, len(field_name), format("circular class references: {} -- break the cycle before leaving scope (e.g. set a field to None or clear a list)", path))
+        # Show each edge in the cycle
+        idx: i64 = 0
+        while idx < len(cycle)
+            from_cls := cycle[idx]
+            to_cls := cycle[(idx + 1) % len(cycle)]
+            ek := format("{}->{}", from_cls, to_cls)
+            if has(edge_fields, ek)
+                _sink.note(_file, edge_lines[ek], edge_cols[ek], len(edge_fields[ek]), format("  {}.{} -> {}", from_cls, edge_fields[ek], to_cls))
+            end
+            idx += 1
+        end
     end
 end
 
@@ -2272,11 +2308,8 @@ def check(prog: pars.Node, s: sink.Sink)
         return
     end
 
-    # Detect circular class references
+    # Detect circular class references (note, not error)
     _check_circular_refs()
-    if _had_error
-        return
-    end
 
     # ── Pass 2b: validate struct fields/methods ────────────────
     i = 0

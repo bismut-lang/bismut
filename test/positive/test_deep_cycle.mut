@@ -1,0 +1,17 @@
+# test_deep_cycle.mut — circular references through nested containers
+class Foo
+    bars: List[Dict[str, Bar]]
+    def init(self)
+        self.bars = List[Dict[str, Bar]]()
+    end
+end
+
+class Bar
+    foo: Dict[str, List[Foo]]
+    def init(self)
+        self.foo = Dict[str, List[Foo]]()
+    end
+end
+
+f := Foo()
+print(len(f.bars))

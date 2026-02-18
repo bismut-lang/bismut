@@ -15,6 +15,7 @@ src_file = sys.argv[1]
 # Parse flags
 extra_defines: set[str] = set()
 no_debug_leaks = False
+quiet = False
 i = 2
 while i < len(sys.argv):
     if sys.argv[i] == "--define" and i + 1 < len(sys.argv):
@@ -22,6 +23,9 @@ while i < len(sys.argv):
         i += 2
     elif sys.argv[i] == "--no-debug-leaks":
         no_debug_leaks = True
+        i += 1
+    elif sys.argv[i] in ("--quiet", "-q"):
+        quiet = True
         i += 1
     else:
         i += 1
@@ -41,7 +45,7 @@ base_dir = os.path.dirname(os.path.abspath(src_file))
 compiler_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 prog = resolve_imports(prog, base_dir, {os.path.abspath(src_file)}, compiler_dir, extra_defines=extra_defines or None, target_platform=target_platform)
 prog = resolve_externs(prog, src_file, compiler_dir, target_platform=target_platform)
-typecheck(prog)
+typecheck(prog, quiet=quiet)
 # Debug leaks on by default (reference compiler always does debug builds)
 debug_leaks = not no_debug_leaks
 c = generate_c(prog, debug_leaks=debug_leaks)

@@ -281,8 +281,9 @@ class InterfaceInfo:
 
 
 class TypeChecker:
-    def __init__(self, prog: Program):
+    def __init__(self, prog: Program, quiet: bool = False):
         self.prog = prog
+        self.quiet = quiet
         self.funcs: Dict[str, Tuple[List[str], str]] = {}
         self.vars: List[Dict[str, VarInfo]] = []
         self.cur_ret: Optional[str] = None
@@ -399,7 +400,7 @@ class TypeChecker:
                 impl_set.add(iname)
             _CLASS_IMPLEMENTS[cls.name] = impl_set
 
-        # Detect circular class references (refcount cycles)
+        # Detect circular class references (note, not error)
         self._check_circular_refs()
 
         # Pass 2b: validate struct fields/methods and build StructInfo
@@ -514,9 +515,9 @@ class TypeChecker:
     # -------------------------
 
     def _check_circular_refs(self) -> None:
-        """Detect mutual reference cycles among class fields (would leak with refcounting).
-        Self-references (e.g. Node.next: Node) are allowed — only multi-class
-        cycles (A -> B -> A) are rejected."""
+        """Detect mutual reference cycles among class fields and emit a note.
+        Self-references (e.g. Node.next: Node) are allowed silently.
+        Multi-class cycles (A -> B -> A) emit a note."""
 
         def _extract_class_refs(ty: str) -> set:
             """Extract all class names reachable from a type (including through containers)."""
@@ -531,19 +532,22 @@ class TypeChecker:
             return refs
 
         # Build adjacency: class -> set of class names referenced by fields
-        # Self-edges are excluded — a class may reference itself (linked lists, trees)
+        # Self-edges are excluded -- a class may reference itself (linked lists, trees)
         adj: Dict[str, set] = {name: set() for name in self.classes}
-        field_locs: Dict[str, dict] = {}
+        field_locs: Dict[str, dict] = {}  # cls_name -> {target_name: loc}
+        field_names: Dict[str, dict] = {}  # cls_name -> {target_name: field_name}
         for cls in self.prog.classes:
             locs: dict = {}
+            names: dict = {}
             for fd in cls.fields:
                 for target in _extract_class_refs(fd.ty.name):
                     if target == cls.name:
-                        print(f"{fd.loc.file}:{fd.loc.line}:{fd.loc.col}: note: class '{cls.name}' has self-referential field '{fd.name}' -- cyclic links will leak memory (leak detector is enabled in debug builds)", file=sys.stderr)
                         continue
                     adj[cls.name].add(target)
                     locs[target] = fd.loc
+                    names[target] = fd.name
             field_locs[cls.name] = locs
+            field_names[cls.name] = names
 
         # DFS-based cycle detection
         WHITE, GRAY, BLACK = 0, 1, 2
@@ -577,14 +581,18 @@ class TypeChecker:
             if color[node] == WHITE:
                 cycle = dfs(node)
                 if cycle is not None:
-                    loc = field_locs[cycle[0]].get(cycle[1] if len(cycle) > 1 else cycle[0])
-                    if loc is None:
-                        loc = self.prog.classes[0].loc
-                    path = " -> ".join(cycle)
-                    raise TypeError(loc,
-                        f"circular class reference detected: {path}. "
-                        f"Classes cannot reference each other in a cycle, "
-                        f"including through List or Dict fields")
+                    if not self.quiet:
+                        path = " -> ".join(cycle)
+                        loc = field_locs.get(cycle[0], {}).get(cycle[1] if len(cycle) > 1 else cycle[0])
+                        prefix = f"{loc.file}:{loc.line}:{loc.col}: " if loc else ""
+                        print(f"{prefix}note: circular class references: {path} -- break the cycle before leaving scope (e.g. set a field to None or clear a list)", file=sys.stderr)
+                        for idx in range(len(cycle)):
+                            from_cls = cycle[idx]
+                            to_cls = cycle[(idx + 1) % len(cycle)]
+                            eloc = field_locs.get(from_cls, {}).get(to_cls)
+                            fname = field_names.get(from_cls, {}).get(to_cls)
+                            if eloc and fname:
+                                print(f"{eloc.file}:{eloc.line}:{eloc.col}: note:   {from_cls}.{fname} -> {to_cls}", file=sys.stderr)
 
     # -------------------------
     # Functions / statements
@@ -1540,5 +1548,5 @@ def _subst_expr(e, type_sub: Dict[str, str]) -> None:
             _subst_expr(v, type_sub)
 
 
-def typecheck(prog: Program) -> None:
-    TypeChecker(prog).check()
+def typecheck(prog: Program, quiet: bool = False) -> None:
+    TypeChecker(prog, quiet=quiet).check()

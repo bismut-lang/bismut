@@ -33,7 +33,6 @@ static __lang_rt_LeakNode __lang_rt_leak_head = {
     &__lang_rt_leak_head, &__lang_rt_leak_head,
     NULL, NULL, NULL, 0, 0
 };
-static int __lang_rt_leak_atexit_registered = 0;
 
 static void __lang_rt_leak_report(void) {
     __lang_rt_LeakNode* n = __lang_rt_leak_head.next;
@@ -63,10 +62,6 @@ static void __lang_rt_leak_report(void) {
 }
 
 static inline void __lang_rt_leak_track(void* obj, const char* type_name, const char* file, int32_t line, int32_t col) {
-    if (!__lang_rt_leak_atexit_registered) {
-        atexit(__lang_rt_leak_report);
-        __lang_rt_leak_atexit_registered = 1;
-    }
     __lang_rt_LeakNode* node = (__lang_rt_LeakNode*)malloc(sizeof(__lang_rt_LeakNode));
     if (!node) return;  // OOM in tracker — silently skip
     node->obj = obj;
@@ -97,11 +92,13 @@ static inline void __lang_rt_leak_untrack(void* obj) {
 #define __LANG_RT_LEAK_TRACK(obj, type, file, line, col) \
     __lang_rt_leak_track((obj), (type), (file), (line), (col))
 #define __LANG_RT_LEAK_UNTRACK(obj) __lang_rt_leak_untrack((obj))
+#define __LANG_RT_LEAK_REPORT() __lang_rt_leak_report()
 
 #else  /* !__LANG_RT_DEBUG_LEAKS */
 
 #define __LANG_RT_LEAK_TRACK(obj, type, file, line, col) ((void)0)
 #define __LANG_RT_LEAK_UNTRACK(obj) ((void)0)
+#define __LANG_RT_LEAK_REPORT() ((void)0)
 
 #endif /* __LANG_RT_DEBUG_LEAKS */
 

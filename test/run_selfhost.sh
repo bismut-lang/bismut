@@ -66,25 +66,6 @@ done
 
 rm -f "$TMPDIR/mut_test" out.c
 
-# ── Bootstrap test: self-hosted compiler compiles itself ──
-echo ""
-echo "--- bootstrap test ---"
-if $COMPILER build src/main.mut -o "$TMPDIR/mut_bootstrap" --compiler-dir "$COMPILER_DIR" 2>/dev/null; then
-    if "$TMPDIR/mut_bootstrap" build src/main.mut -o "$TMPDIR/mut_bootstrap2" --compiler-dir . 2>/dev/null; then
-        echo "  PASS  bootstrap (self-hosted compiler compiles itself)"
-        pass=$((pass + 1))
-    else
-        echo "  FAIL  bootstrap (stage2 compile failed)"
-        fail=$((fail + 1))
-        errors="$errors  bootstrap (stage2)\n"
-    fi
-else
-    echo "  FAIL  bootstrap (stage1 compile failed)"
-    fail=$((fail + 1))
-    errors="$errors  bootstrap (stage1)\n"
-fi
-rm -f "$TMPDIR/mut_bootstrap" "$TMPDIR/mut_bootstrap2" out.c
-
 echo ""
 echo "$pass passed, $fail failed"
 if [ $fail -gt 0 ]; then

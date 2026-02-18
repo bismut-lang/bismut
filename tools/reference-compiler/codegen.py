@@ -2408,6 +2408,8 @@ class CodeGen:
             for v in reversed(scope):
                 if is_ref_type(v.ty):
                     self._emit_release(v, "\"global cleanup\"")
+        # Run leak report after all globals are released
+        self.w("__LANG_RT_LEAK_REPORT();")
         self.ind -= 1
         self.w("}")
 

@@ -690,10 +690,14 @@ All blocks are explicitly closed with 'end'.
         - Self-referential fields are allowed: a class may reference
           its own type (e.g. Node.next: Node) for linked lists, trees,
           and similar data structures.
-        - Mutual circular references between classes (A -> B -> A) are
-          rejected by the compiler — the typechecker detects cycles
-          (including through List or Dict fields) and raises an error.
-          Only self-references (e.g. Node.next: Node) are allowed.
+        - Circular references between classes are allowed — both
+          self-referential (Node.next: Node) and mutual (A.b: B +
+          B.a: A, including through List or Dict fields). The compiler
+          emits a note when it detects a cycle, since objects trapped
+          in a reference cycle will leak (their refcounts never reach
+          zero). Break the cycle manually before leaving scope (e.g.
+          set a field to None or clear a list). The debug-mode leak
+          detector catches these at runtime.
 
 ------------------------------------------------------------
 8b. ENUMS
@@ -899,6 +903,8 @@ argument (append(nums, 10)).
     List[T]()                           constructor
     List[T]() {e1, e2, ...}             constructor with initializer
     append(lst: List[T], val: T)        in-place push (void)
+    pop(lst: List[T]) -> T               remove and return last element
+    remove(lst: List[T], idx: i64)       remove element at index (void)
     get(lst: List[T], idx: i64) -> T    index access
     set(lst: List[T], idx: i64, val: T) index assign (void)
     len(lst: List[T]) -> i64            length
@@ -1389,6 +1395,9 @@ The self-hosted compiler provides a subcommand-based interface:
     Options:
       -o, --output <name>     Output binary name (default: source file stem)
       -r, --release           Optimized release build (-O2; default is debug)
+      --no-debug-leaks        Disable leak detector (enabled by default in
+                              debug builds)
+      -q, --quiet             Suppress warnings and notes
       --cc <path>             C compiler to use (default: gcc)
       --tcc                   Use embedded TCC compiler (no external gcc needed)
       -D, --define <SYMBOL>   Preprocessor define (can be repeated)
@@ -1408,6 +1417,8 @@ The self-hosted compiler provides a subcommand-based interface:
 
     Options:
       -r, --release           Optimized release build
+      --no-debug-leaks        Disable leak detector
+      -q, --quiet             Suppress warnings and notes
       -D, --define <SYMBOL>   Preprocessor define (can be repeated)
       --compiler-dir <dir>    Compiler root directory
 
@@ -1465,7 +1476,38 @@ The self-hosted compiler provides a subcommand-based interface:
         }
 
 ------------------------------------------------------------
-15. COMPLETE EXAMPLE
+15. DEBUG LEAK DETECTOR
+------------------------------------------------------------
+
+    The leak detector tracks all heap allocations and reports objects
+    still alive at program exit.  It catches reference cycles and
+    other memory leaks.
+
+    Enabled by default in debug builds (no -r flag).
+    Disabled with --no-debug-leaks or in release builds (-r).
+
+    How it works:
+        - Allocation tracking: rt_rc.h maintains a global intrusive
+          linked list of all live allocations.  Each refcount header
+          has prev/next pointers and a type-name tag.  Allocations
+          insert into the list; release at rc=0 removes before freeing.
+        - Exit report: after global cleanup, __LANG_RT_LEAK_REPORT()
+          walks the live-allocation list.  Any object still alive with
+          rc != UINT32_MAX (not immortal) is a leak.  Reports object
+          address, type name, and refcount to stderr.
+        - Zero overhead in release: all tracking code is guarded behind
+          #ifdef __LANG_RT_DEBUG_LEAKS.  Release builds define nothing,
+          so the macros expand to no-ops.
+        - Covers: classes, strings, lists, dicts, and extern opaque
+          types.  Immortal strings (rc = UINT32_MAX) are excluded.
+
+    Example output (2 Node objects trapped in a reference cycle):
+        [leak] 0x55f3a1b2c040  type=Node  rc=1
+        [leak] 0x55f3a1b2c080  type=Node  rc=1
+        2 object(s) leaked.
+
+------------------------------------------------------------
+16. COMPLETE EXAMPLE
 ------------------------------------------------------------
 
     def fib(n: i64) -> i64

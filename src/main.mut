@@ -32,14 +32,35 @@ import version as ver
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 
+def _severity_label(m: sink.Message) -> str
+    if m.is_warning()
+        return "warning"
+    end
+    if m.is_note()
+        return "note"
+    end
+    return "error"
+end
+
 def _report_errors(s: sink.Sink)
     j: i64 = 0
     while j < s.count()
         m := s.get(j)
-        print(format("{}:{}:{}: error: {}", m.file, m.line, m.col, m.msg))
+        print(format("{}:{}:{}: {}: {}", m.file, m.line, m.col, _severity_label(m), m.msg))
         j += 1
     end
     os.exit(1)
+end
+
+def _report_notes(s: sink.Sink)
+    j: i64 = 0
+    while j < s.count()
+        m := s.get(j)
+        if m.is_note() or m.is_warning()
+            print(format("{}:{}:{}: {}: {}", m.file, m.line, m.col, _severity_label(m), m.msg))
+        end
+        j += 1
+    end
 end
 
 def _detect_compiler_dir() -> str
@@ -61,7 +82,7 @@ class CompileResult
     end
 end
 
-def _compile(src_file: str, compiler_dir: str, debug: bool, debug_leaks: bool, defines: List[str]) -> CompileResult
+def _compile(src_file: str, compiler_dir: str, debug: bool, debug_leaks: bool, defines: List[str], quiet: bool) -> CompileResult
     result := CompileResult()
 
     if not filesystem.exists(src_file)
@@ -86,6 +107,9 @@ def _compile(src_file: str, compiler_dir: str, debug: bool, debug_leaks: bool, d
     tc.check(prog, s)
     if s.has_errors()
         _report_errors(s)
+    end
+    if not quiet
+        _report_notes(s)
     end
 
     c_code := gen_mod.generate_c(prog, src_file, ext, debug, debug_leaks)
@@ -136,6 +160,21 @@ end
 
 # ─── TCC in-process compilation (Linux / macOS / Windows) ────────────
 
+def _tcc_apply_ldflags(state: tcc.TccState, ldflags: List[str])
+    i: i64 = 0
+    while i < len(ldflags)
+        flag := ldflags[i]
+        if su.starts_with(flag, "-L")
+            tcc.add_library_path(state, string.substr(flag, 2, len(flag) - 2))
+        elif su.starts_with(flag, "-l")
+            tcc.add_library(state, string.substr(flag, 2, len(flag) - 2))
+        else
+            tcc.set_options(state, flag)
+        end
+        i += 1
+    end
+end
+
 @if __LINUX__
 def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, ext: ir.ExternInfo)
     state := tcc.new()
@@ -163,11 +202,7 @@ def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, e
     end
 
     tcc.add_library(state, "m")
-    i = 0
-    while i < len(ext.ldflags)
-        tcc.set_options(state, ext.ldflags[i])
-        i += 1
-    end
+    _tcc_apply_ldflags(state, ext.ldflags)
 
     rc = tcc.output_file(state, out_name)
     if rc == -1
@@ -202,11 +237,7 @@ def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, e
     end
 
     tcc.add_library(state, "m")
-    i = 0
-    while i < len(ext.ldflags)
-        tcc.set_options(state, ext.ldflags[i])
-        i += 1
-    end
+    _tcc_apply_ldflags(state, ext.ldflags)
 
     rc = tcc.output_file(state, out_name)
     if rc == -1
@@ -244,11 +275,7 @@ def _tcc_compile(c_code: str, out_name: str, release: bool, compiler_dir: str, e
         os.exit(1)
     end
 
-    i = 0
-    while i < len(ext.ldflags)
-        tcc.set_options(state, ext.ldflags[i])
-        i += 1
-    end
+    _tcc_apply_ldflags(state, ext.ldflags)
 
     rc = tcc.output_file(state, out_name)
     if rc == -1
@@ -319,10 +346,11 @@ def _cmd_build(args: ap.ParsedArgs, compiler_dir: str)
     debug := not release
     no_debug_leaks := args.flag("no-debug-leaks")
     debug_leaks := debug and not no_debug_leaks
+    quiet := args.flag("quiet")
     out_name := args.get("output")
     defines := args.get_list("define")
 
-    result := _compile(src_file, compiler_dir, debug, debug_leaks, defines)
+    result := _compile(src_file, compiler_dir, debug, debug_leaks, defines, quiet)
 
     if len(out_name) == 0
         out_name = _default_output_name(src_file)
@@ -382,9 +410,10 @@ def _cmd_run(args: ap.ParsedArgs, compiler_dir: str)
     debug := not release
     no_debug_leaks := args.flag("no-debug-leaks")
     debug_leaks := debug and not no_debug_leaks
+    quiet := args.flag("quiet")
     defines := args.get_list("define")
 
-    result := _compile(src_file, compiler_dir, debug, debug_leaks, defines)
+    result := _compile(src_file, compiler_dir, debug, debug_leaks, defines, quiet)
     out_name := _default_output_name(src_file)
 
     @if __LINUX__
@@ -402,7 +431,8 @@ def _cmd_run(args: ap.ParsedArgs, compiler_dir: str)
     stringbuilder.append_str(sb, "./")
     stringbuilder.append_str(sb, out_name)
     @end
-    i: i64 = 0
+    # positional(0) is the source file — skip it, pass only extra args
+    i: i64 = 1
     while i < args.positional_count()
         stringbuilder.append_str(sb, " ")
         stringbuilder.append_str(sb, args.positional(i))
@@ -438,6 +468,7 @@ build_cmd.add_flag("no-debug-leaks", "", "Disable leak detector (enabled by defa
 build_cmd.add_option("cc", "", "C compiler to use (default: gcc)", "")
 build_cmd.add_flag("tcc", "", "Use embedded TCC compiler")
 build_cmd.add_multi_option("define", "D", "Preprocessor define")
+build_cmd.add_flag("quiet", "q", "Suppress warnings and notes")
 build_cmd.add_option("compiler-dir", "", "Compiler root directory", "")
 
 run_cmd := cli.add_command("run", "Build and run")
@@ -445,6 +476,7 @@ run_cmd.add_positional("file", "Source .mut file", True)
 run_cmd.add_flag("release", "r", "Optimized release build (default is debug)")
 run_cmd.add_flag("no-debug-leaks", "", "Disable leak detector (enabled by default in debug builds)")
 run_cmd.add_multi_option("define", "D", "Preprocessor define")
+run_cmd.add_flag("quiet", "q", "Suppress warnings and notes")
 run_cmd.add_option("compiler-dir", "", "Compiler root directory", "")
 
 analyze_cmd := cli.add_command("analyze", "Analyze and output JSON diagnostics")

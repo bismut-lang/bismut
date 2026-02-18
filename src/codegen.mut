@@ -530,6 +530,9 @@ def _emit_program(cg: cs.CodeGen, prog: pars.Node)
         j += 1
     end
 
+    # Run leak report after all globals are released
+    cg.w("__LANG_RT_LEAK_REPORT();")
+
     cg.ind -= 1
     cg.w("}")
 end

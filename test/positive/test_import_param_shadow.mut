@@ -1,0 +1,57 @@
+# test_import_param_shadow.mut — Regression test for Phase 1 import rename bug
+#
+# When a module is imported, the resolver renames all top-level names with
+# the alias prefix (e.g. label → nc__label). Parameter and local variable
+# names that collide with top-level function names must NOT be mangled.
+
+import lib.name_clash as nc
+
+# Test 1: call function that has a parameter named same as another function
+print("--- test 1: param shadows function name ---")
+result := nc.make_greeting("hello")
+if result != "hello"
+    print(format("FAIL: expected 'hello', got '{}'", result))
+else
+    print("PASS")
+end
+
+# Test 2: another function with same pattern
+print("--- test 2: param in second function ---")
+n := nc.get_label_length("test")
+if n != 4
+    print(format("FAIL: expected 4, got {}", n))
+else
+    print("PASS")
+end
+
+# Test 3: the actual function with that name still works
+print("--- test 3: original function still works ---")
+lbl := nc.label()
+if lbl != "default_label"
+    print(format("FAIL: expected 'default_label', got '{}'", lbl))
+else
+    print("PASS")
+end
+
+# Test 4: method parameter shadows function name
+print("--- test 4: method param shadows function ---")
+w := nc.Widget("btn")
+r := w.render("clicked")
+if r != "clicked"
+    print(format("FAIL: expected 'clicked', got '{}'", r))
+else
+    print("PASS")
+end
+
+# Test 5: local var shadows function name
+print("--- test 5: for-loop var shadows function ---")
+# (uses module functions with varied params to verify no false positives)
+total: i64 = 0
+for i:i64 in range(3)
+    total += nc.get_label_length("ab")
+end
+if total != 6
+    print(format("FAIL: expected 6, got {}", total))
+else
+    print("PASS")
+end

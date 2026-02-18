@@ -178,6 +178,58 @@ def _walk_rename(node: pars.Node, rmap: Dict[str, str])
     # Rename identifiers and type references within a module's AST
     k := node.kind
 
+    # Scope-aware renaming for functions/methods: exclude parameter and
+    # local variable names from the rename map to avoid mangling locals
+    # that happen to share a name with a top-level symbol
+    if k == mp.NodeKind.FUNC_DECL
+        local_names: Dict[str, i64] = Dict[str, i64]()
+        i: i64 = 0
+        while i < node.child_count()
+            _collect_local_names(node.child(i), local_names)
+            i += 1
+        end
+
+        # Check if any local name shadows a rename target
+        shadow: bool = False
+        lk := keys(local_names)
+        j: i64 = 0
+        while j < len(lk)
+            if has(rmap, lk[j])
+                shadow = True
+            end
+            j += 1
+        end
+
+        if shadow
+            # Build scoped rename map excluding shadowed names
+            scoped_rmap: Dict[str, str] = Dict[str, str]()
+            rk := keys(rmap)
+            j = 0
+            while j < len(rk)
+                if not has(local_names, rk[j])
+                    scoped_rmap[rk[j]] = rmap[rk[j]]
+                end
+                j += 1
+            end
+            # Rename declaration-level nodes (name, type refs) with full rmap,
+            # then recurse into body with scoped rmap
+            # The FUNC_DECL node's own value (name) was already renamed at declaration level,
+            # so we only need to handle type refs on params/return and body stmts
+            i = 0
+            while i < node.child_count()
+                ch := node.child(i)
+                ch_k := ch.kind
+                if ch_k == mp.NodeKind.PARAM or ch_k == mp.NodeKind.TYPE or ch_k == mp.NodeKind.TYPE_LIST or ch_k == mp.NodeKind.TYPE_DICT or ch_k == mp.NodeKind.TYPE_FN
+                    _walk_rename(ch, rmap)
+                else
+                    _walk_rename(ch, scoped_rmap)
+                end
+                i += 1
+            end
+            return
+        end
+    end
+
     if k == mp.NodeKind.IDENT
         if has(rmap, node.value)
             node.value = rmap[node.value]

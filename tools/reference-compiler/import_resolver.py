@@ -60,13 +60,29 @@ def _walk_stmts(stmts, on_tr, on_ex):
             _walk_stmts(st.body.stmts, on_tr, on_ex)
 
 
-def _walk_decls(funcs, classes, ifaces, on_tr, on_ex, structs=None):
-    """Walk declarations, applying on_tr to TypeRefs and on_ex to Exprs."""
+def _walk_decls(funcs, classes, ifaces, on_tr, on_ex, structs=None, rmap=None):
+    """Walk declarations, applying on_tr to TypeRefs and on_ex to Exprs.
+
+    When rmap is provided, expression renaming is scope-aware: parameter and
+    local variable names that collide with top-level names in the rename map
+    are excluded from renaming within that function/method body.
+    """
+    def _scoped_on_ex(params, stmts, rmap):
+        if rmap is None:
+            return on_ex
+        local_names = _collect_local_names(params, stmts)
+        shadowed = local_names & rmap.keys()
+        if not shadowed:
+            return on_ex
+        scoped_rmap = {k: v for k, v in rmap.items() if k not in local_names}
+        return lambda e, r=scoped_rmap: _rename_expr(e, r)
+
     for f in funcs:
         for p in f.params:
             p.ty = on_tr(p.ty)
         f.ret = on_tr(f.ret)
-        _walk_stmts(f.body.stmts, on_tr, on_ex)
+        scope_ex = _scoped_on_ex(f.params, f.body.stmts, rmap)
+        _walk_stmts(f.body.stmts, on_tr, scope_ex)
     for c in classes:
         for fd in c.fields:
             fd.ty = on_tr(fd.ty)
@@ -74,7 +90,8 @@ def _walk_decls(funcs, classes, ifaces, on_tr, on_ex, structs=None):
             for p in m.params:
                 p.ty = on_tr(p.ty)
             m.ret = on_tr(m.ret)
-            _walk_stmts(m.body.stmts, on_tr, on_ex)
+            scope_ex = _scoped_on_ex(m.params, m.body.stmts, rmap)
+            _walk_stmts(m.body.stmts, on_tr, scope_ex)
     for st in (structs or []):
         for fd in st.fields:
             fd.ty = on_tr(fd.ty)
@@ -82,7 +99,8 @@ def _walk_decls(funcs, classes, ifaces, on_tr, on_ex, structs=None):
             for p in m.params:
                 p.ty = on_tr(p.ty)
             m.ret = on_tr(m.ret)
-            _walk_stmts(m.body.stmts, on_tr, on_ex)
+            scope_ex = _scoped_on_ex(m.params, m.body.stmts, rmap)
+            _walk_stmts(m.body.stmts, on_tr, scope_ex)
     for iface in ifaces:
         for ms in iface.method_sigs:
             for p in ms.params:
@@ -537,7 +555,7 @@ def resolve_imports(prog: Program, base_dir: str, loading: set, compiler_dir: st
         # Rename all type refs and expressions within module declarations
         on_tr = lambda tr, r=rmap: _rename_typeref(tr, r)
         on_ex = lambda e, r=rmap: _rename_expr(e, r)
-        _walk_decls(mod.funcs, mod.classes, mod.interfaces, on_tr, on_ex, structs=mod.structs)
+        _walk_decls(mod.funcs, mod.classes, mod.interfaces, on_tr, on_ex, structs=mod.structs, rmap=rmap)
         _walk_stmts(mod.stmts, on_tr, on_ex)
 
         # Merge into main program, deduplicating extern decls that may appear

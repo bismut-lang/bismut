@@ -1,0 +1,30 @@
+# lib/name_clash.mut — Module for testing Phase 1 rename scope awareness
+#
+# This module has a top-level function 'label' and other functions that
+# use 'label' as a parameter name. The import resolver must NOT mangle
+# the parameter usages into the module-prefixed function name.
+
+def label() -> str
+    return "default_label"
+end
+
+def make_greeting(label: str) -> str
+    # 'label' here is a parameter — must NOT be renamed to <alias>__label
+    return label
+end
+
+def get_label_length(label: str) -> i64
+    return len(label)
+end
+
+class Widget
+    name: str
+
+    def init(self, name: str)
+        self.name = name
+    end
+
+    def render(self, label: str) -> str
+        return label
+    end
+end

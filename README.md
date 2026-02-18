@@ -1,5 +1,8 @@
 # Bismut
 
+[![CI](https://github.com/bismut-lang/bismut/actions/workflows/ci.yml/badge.svg)](https://github.com/bismut-lang/bismut/actions/workflows/ci.yml)
+[![Release](https://github.com/bismut-lang/bismut/actions/workflows/release.yml/badge.svg)](https://github.com/bismut-lang/bismut/actions/workflows/release.yml)
+
 A statically-typed language with Python-like syntax that compiles to C99.
 The goal is Python's readability with native C performance -- no VM, no garbage
 collector, no runtime overhead.

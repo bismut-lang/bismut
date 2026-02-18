@@ -7,7 +7,45 @@ permissions:
   contents: write
 
 jobs:
+  test-reference:
+    name: Tests (Python compiler)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate version module
+        run: bash tools/gen_version.sh
+
+      - name: Run test suite (reference compiler)
+        run: bash test/run_py.sh
+
+  test-selfhost:
+    name: Tests (self-hosted compiler)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate version module
+        run: bash tools/gen_version.sh
+
+      - name: Bootstrap self-hosted compiler
+        run: |
+          python3 tools/reference-compiler/main.py src/main.mut --no-debug-leaks
+          gcc -O2 -std=c99 -Irt -Ilibs/tcc/linux -o bismut out.c -Llibs/tcc/linux -ltcc -ldl -lm
+
+      - name: Run test suite (self-hosted compiler)
+        run: bash test/run_selfhost.sh
+
   build:
+    needs: [test-reference, test-selfhost]
     strategy:
       matrix:
         include:
@@ -73,6 +111,7 @@ jobs:
           path: bismut-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz
 
   build-windows:
+    needs: [test-reference, test-selfhost]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

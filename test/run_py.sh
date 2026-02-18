@@ -64,8 +64,8 @@ rm -f "$TMPDIR/mut_test" out.c
 # ── Bootstrap test: compile self-hosted compiler, then use it to compile itself ──
 echo ""
 echo "--- bootstrap test ---"
-if python3 tools/reference-compiler/main.py src/main.mut 2>/dev/null \
-   && gcc -O2 -std=c99 -Irt -o "$TMPDIR/mut_bootstrap" out.c -lm -ltcc -ldl 2>/dev/null; then
+if python3 tools/reference-compiler/main.py src/main.mut --no-debug-leaks 2>/dev/null \
+   && gcc -O2 -std=c99 -Irt -Ilibs/tcc/linux -o "$TMPDIR/mut_bootstrap" out.c -Llibs/tcc/linux -ltcc -ldl -lm 2>/dev/null; then
     if "$TMPDIR/mut_bootstrap" build src/main.mut -o "$TMPDIR/mut_bootstrap2" --compiler-dir . 2>/dev/null; then
         echo "  PASS  bootstrap (self-hosted compiler compiles itself)"
         pass=$((pass + 1))

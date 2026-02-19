@@ -1,0 +1,1239 @@
+# core.mut — BUI Core Infrastructure
+#
+# Types, context, layout, drawing, input, ID system, control helpers.
+# Renderer-agnostic immediate-mode GUI core inspired by microui.
+#
+# Usage:
+#   import bui.core as bui
+#   import bui.widgets as ui
+#
+#   ctx := bui.new_context(my_text_measure)
+#   bui.begin(ctx)
+#   ...
+#   bui.end(ctx)
+#   # iterate ctx.cmds for rendering
+
+extern string
+
+# ═══════════════════════════════════════════════════════════════════════
+# Structs
+# ═══════════════════════════════════════════════════════════════════════
+
+# Axis-aligned rectangle with integer coordinates.
+struct Rect
+    x: i64
+    y: i64
+    w: i64
+    h: i64
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Enums
+# ═══════════════════════════════════════════════════════════════════════
+
+# Draw command type: CLIP, RECT, TEXT, or ICON.
+enum CmdKind
+    CLIP, RECT, TEXT, ICON
+end
+
+# Color identifiers for the style system.
+# Use with style_color_r/g/b/a() and set_style_color().
+enum ColorId
+    TEXT
+    BORDER
+    WINDOW_BG
+    TITLE_BG
+    TITLE_TEXT
+    PANEL_BG
+    BUTTON
+    BUTTON_HOVER
+    BUTTON_FOCUS
+    BASE
+    BASE_HOVER
+    BASE_FOCUS
+    SCROLL_BASE
+    SCROLL_THUMB
+    DRAG_BG
+    DRAG_BORDER
+    DRAG_TEXT
+    DROP_LINE
+    DROP_OVERLAY
+    MAX
+end
+
+# Built-in icon identifiers for draw_icon_raw() and button_ex().
+enum Icon
+    NONE
+    CLOSE = 1
+    CHECK
+    COLLAPSED
+    EXPANDED
+end
+
+# Widget result flags, returned by widget functions.
+# ACTIVE: widget is expanded/open. SUBMIT: user confirmed (button click, enter).
+# CHANGE: value changed (slider, textbox) or drop received.
+# SELECT: item was selected (tree item, header click).
+enum Res
+    ACTIVE = 1
+    SUBMIT = 2
+    CHANGE = 4
+    SELECT = 8
+end
+
+# Widget option flags. Combine with bitwise OR.
+# Layout: ALIGN_CENTER, ALIGN_RIGHT.
+# Behavior: NO_INTERACT, HOLD_FOCUS, AUTO_SIZE, EXPANDED.
+# Frame: NO_FRAME, NO_RESIZE, NO_SCROLL, NO_CLOSE, NO_TITLE, COLLAPSIBLE.
+# Drag & drop: NO_DRAG, DRAGGABLE, DROP_TARGET.
+# Selection: SELECTABLE, MULTI_SELECT.
+# State: CLOSED, POPUP.
+enum Opt
+    ALIGN_CENTER = 1
+    ALIGN_RIGHT = 2
+    NO_INTERACT = 4
+    NO_FRAME = 8
+    NO_RESIZE = 16
+    NO_SCROLL = 32
+    NO_CLOSE = 64
+    NO_TITLE = 128
+    HOLD_FOCUS = 256
+    AUTO_SIZE = 512
+    POPUP = 1024
+    CLOSED = 2048
+    EXPANDED = 4096
+    NO_DRAG = 8192
+    DRAGGABLE = 16384
+    DROP_TARGET = 32768
+    SELECTABLE = 65536
+    MULTI_SELECT = 131072
+    COLLAPSIBLE = 262144
+end
+
+# Mouse button flags for input_mousedown / input_mouseup.
+enum MouseBtn
+    LEFT = 1
+    RIGHT = 2
+    MIDDLE = 4
+end
+
+# Keyboard modifier / key flags for input_keydown / input_keyup.
+enum Key
+    SHIFT = 1
+    CTRL = 2
+    ALT = 4
+    BACKSPACE = 8
+    RETURN = 16
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Constants
+# ═══════════════════════════════════════════════════════════════════════
+
+const HASH_INITIAL: i64 = 2166136261
+const UNCLIPPED: i64 = 16777216
+const CLIP_NONE: i64 = 0
+const CLIP_PART: i64 = 1
+const CLIP_ALL: i64 = 2
+const LAYOUT_RELATIVE: i64 = 1
+const LAYOUT_ABSOLUTE: i64 = 2
+const DRAG_THRESHOLD: i64 = 4
+const DROP_BEFORE: i64 = 1
+const DROP_INTO: i64 = 2
+const DROP_AFTER: i64 = 3
+
+# ═══════════════════════════════════════════════════════════════════════
+# Interface
+# ═══════════════════════════════════════════════════════════════════════
+
+# Interface for backend-specific text measurement.
+# Implement this to connect bui to your rendering backend.
+interface ITextMeasure
+    def text_width(self, text: str) -> i64
+    def text_height(self) -> i64
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Classes
+# ═══════════════════════════════════════════════════════════════════════
+
+# A single draw command emitted by the UI.
+# Iterate ctx.cmds after end_frame() to render with your backend.
+class DrawCmd
+    kind: i64
+    # CLIP
+    clip_x: i64
+    clip_y: i64
+    clip_w: i64
+    clip_h: i64
+    # RECT / ICON bounding box
+    rect_x: i64
+    rect_y: i64
+    rect_w: i64
+    rect_h: i64
+    # Color (shared by RECT, TEXT, ICON)
+    color_r: i64
+    color_g: i64
+    color_b: i64
+    color_a: i64
+    # TEXT
+    text: str
+    text_x: i64
+    text_y: i64
+    # ICON
+    icon_id: i64
+
+    def init(self, kind: i64)
+        self.kind = kind
+    end
+end
+
+# A UI container (window, panel, or popup).
+# Manages its own rect, body, scroll offset, z-order, and draw commands.
+class Container
+    rect_x: i64
+    rect_y: i64
+    rect_w: i64
+    rect_h: i64
+    body_x: i64
+    body_y: i64
+    body_w: i64
+    body_h: i64
+    content_w: i64
+    content_h: i64
+    scroll_x: i64
+    scroll_y: i64
+    zindex: i64
+    open: bool
+    collapsed: bool
+    is_root: bool
+    cmds: List[DrawCmd]
+
+    def init(self)
+        self.open = True
+        self.cmds = List[DrawCmd]()
+    end
+end
+
+# Layout state for positioning widgets.
+# Managed internally by the layout stack.
+class Layout
+    body_x: i64
+    body_y: i64
+    body_w: i64
+    body_h: i64
+    next_x: i64
+    next_y: i64
+    next_w: i64
+    next_h: i64
+    pos_x: i64
+    pos_y: i64
+    size_x: i64
+    size_y: i64
+    max_x: i64
+    max_y: i64
+    widths: List[i64]
+    items: i64
+    item_index: i64
+    next_row: i64
+    next_type: i64
+    indent: i64
+
+    def init(self)
+        self.widths = List[i64]()
+        self.max_x = -16777216
+        self.max_y = -16777216
+    end
+end
+
+# Visual style configuration.
+# Controls padding, spacing, indent, title bar height, scrollbar sizes,
+# and all theme colors (indexed by ColorId).
+class Style
+    size_x: i64
+    size_y: i64
+    padding: i64
+    spacing: i64
+    indent: i64
+    title_height: i64
+    scrollbar_size: i64
+    thumb_size: i64
+    colors: List[i64]
+
+    def init(self)
+        self.colors = List[i64]()
+    end
+end
+
+# The main UI context. Holds all state for one bui instance.
+# Create with Context(text_measure). One context per UI.
+class Context
+    text_measure: ITextMeasure
+    style: Style
+
+    hover: i64
+    focus: i64
+    last_id: i64
+    last_rect_x: i64
+    last_rect_y: i64
+    last_rect_w: i64
+    last_rect_h: i64
+    last_zindex: i64
+    updated_focus: bool
+    frame: i64
+
+    hover_root: Container
+    next_hover_root: Container
+    scroll_target: Container
+    current_root: Container
+
+    id_stack: List[i64]
+    layout_stack: List[Layout]
+    container_stack: List[Container]
+    root_container_stack: List[Container]
+    clip_stack_x: List[i64]
+    clip_stack_y: List[i64]
+    clip_stack_w: List[i64]
+    clip_stack_h: List[i64]
+
+    containers: Dict[i64, Container]
+    root_list: List[Container]
+    treenode_active: Dict[i64, bool]
+
+    cmds: List[DrawCmd]
+
+    mouse_x: i64
+    mouse_y: i64
+    last_mouse_x: i64
+    last_mouse_y: i64
+    mouse_delta_x: i64
+    mouse_delta_y: i64
+    scroll_delta_x: i64
+    scroll_delta_y: i64
+    mouse_down: i64
+    mouse_pressed: i64
+    key_down: i64
+    key_pressed: i64
+    input_text: str
+
+    number_edit_buf: str
+    number_edit_id: i64
+
+    # Drag & drop
+    drag_id: i64
+    drag_active: bool
+    drag_start_x: i64
+    drag_start_y: i64
+    drag_data: str
+    drag_label: str
+    drop_id: i64
+    drop_position: i64
+    last_drop_source: str
+    last_drop_position: i64
+
+    def init(self, tm: ITextMeasure)
+        self.text_measure = tm
+        self.style = default_style()
+        self.id_stack = List[i64]()
+        self.layout_stack = List[Layout]()
+        self.container_stack = List[Container]()
+        self.root_container_stack = List[Container]()
+        self.clip_stack_x = List[i64]()
+        self.clip_stack_y = List[i64]()
+        self.clip_stack_w = List[i64]()
+        self.clip_stack_h = List[i64]()
+        self.containers = Dict[i64, Container]()
+        self.root_list = List[Container]()
+        self.treenode_active = Dict[i64, bool]()
+        self.cmds = List[DrawCmd]()
+        self.input_text = ""
+        self.number_edit_buf = ""
+        self.drag_data = ""
+        self.drag_label = ""
+        self.last_drop_source = ""
+    end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Utility Functions
+# ═══════════════════════════════════════════════════════════════════════
+
+def min_i(a: i64, b: i64) -> i64
+    if a < b
+        return a
+    end
+    return b
+end
+
+def max_i(a: i64, b: i64) -> i64
+    if a > b
+        return a
+    end
+    return b
+end
+
+def clamp_i(x: i64, lo: i64, hi: i64) -> i64
+    return min_i(hi, max_i(lo, x))
+end
+
+def clamp_f(x: f64, lo: f64, hi: f64) -> f64
+    if x < lo
+        return lo
+    end
+    if x > hi
+        return hi
+    end
+    return x
+end
+
+def hash_str(h: i64, s: str) -> i64
+    for i:i64 in range(len(s))
+        h = ((h ^ s[i]) * 16777619) & 0xFFFFFFFF
+    end
+    return h
+end
+
+def rect_overlaps_point(rx: i64, ry: i64, rw: i64, rh: i64, px: i64, py: i64) -> bool
+    return px >= rx and px < rx + rw and py >= ry and py < ry + rh
+end
+
+# Return a copy of rect r expanded by n pixels on each side.
+def expand_rect(r: Rect, n: i64) -> Rect
+    return Rect(r.x - n, r.y - n, r.w + n * 2, r.h + n * 2)
+end
+
+# Return the intersection of two rects (the overlapping area).
+def intersect_rects(a: Rect, b: Rect) -> Rect
+    x1 := max_i(a.x, b.x)
+    y1 := max_i(a.y, b.y)
+    x2 := min_i(a.x + a.w, b.x + b.w)
+    y2 := min_i(a.y + a.h, b.y + b.h)
+    if x2 < x1
+        x2 = x1
+    end
+    if y2 < y1
+        y2 = y1
+    end
+    return Rect(x1, y1, x2 - x1, y2 - y1)
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Style
+# ═══════════════════════════════════════════════════════════════════════
+
+def add_style_color(s: Style, r: i64, g: i64, b: i64, a: i64)
+    append(s.colors, r)
+    append(s.colors, g)
+    append(s.colors, b)
+    append(s.colors, a)
+end
+
+# Create the default style with built-in dark theme colors.
+def default_style() -> Style
+    s := Style()
+    s.size_x = 68
+    s.size_y = 10
+    s.padding = 5
+    s.spacing = 4
+    s.indent = 24
+    s.title_height = 24
+    s.scrollbar_size = 12
+    s.thumb_size = 8
+    add_style_color(s, 230, 230, 230, 255)   # TEXT
+    add_style_color(s, 25, 25, 25, 255)      # BORDER
+    add_style_color(s, 50, 50, 50, 255)      # WINDOW_BG
+    add_style_color(s, 25, 25, 25, 255)      # TITLE_BG
+    add_style_color(s, 240, 240, 240, 255)   # TITLE_TEXT
+    add_style_color(s, 0, 0, 0, 0)           # PANEL_BG
+    add_style_color(s, 75, 75, 75, 255)      # BUTTON
+    add_style_color(s, 95, 95, 95, 255)      # BUTTON_HOVER
+    add_style_color(s, 115, 115, 115, 255)   # BUTTON_FOCUS
+    add_style_color(s, 30, 30, 30, 255)      # BASE
+    add_style_color(s, 35, 35, 35, 255)      # BASE_HOVER
+    add_style_color(s, 40, 40, 40, 255)      # BASE_FOCUS
+    add_style_color(s, 43, 43, 43, 255)      # SCROLL_BASE
+    add_style_color(s, 30, 30, 30, 255)      # SCROLL_THUMB
+    add_style_color(s, 50, 50, 55, 220)      # DRAG_BG
+    add_style_color(s, 120, 160, 220, 255)   # DRAG_BORDER
+    add_style_color(s, 230, 230, 240, 255)   # DRAG_TEXT
+    add_style_color(s, 80, 140, 230, 255)    # DROP_LINE
+    add_style_color(s, 80, 140, 230, 80)     # DROP_OVERLAY
+    return s
+end
+
+# Get the red component of a style color by ColorId index.
+def style_color_r(ctx: Context, idx: i64) -> i64
+    return ctx.style.colors[idx * 4]
+end
+
+# Get the green component of a style color by ColorId index.
+def style_color_g(ctx: Context, idx: i64) -> i64
+    return ctx.style.colors[idx * 4 + 1]
+end
+
+# Get the blue component of a style color by ColorId index.
+def style_color_b(ctx: Context, idx: i64) -> i64
+    return ctx.style.colors[idx * 4 + 2]
+end
+
+# Get the alpha component of a style color by ColorId index.
+def style_color_a(ctx: Context, idx: i64) -> i64
+    return ctx.style.colors[idx * 4 + 3]
+end
+
+# Set a style color by ColorId index. Components are 0-255 RGBA.
+def set_style_color(ctx: Context, idx: i64, r: i64, g: i64, b: i64, a: i64)
+    base := idx * 4
+    ctx.style.colors[base] = r
+    ctx.style.colors[base + 1] = g
+    ctx.style.colors[base + 2] = b
+    ctx.style.colors[base + 3] = a
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# ID System
+# ═══════════════════════════════════════════════════════════════════════
+
+# Generate a unique ID from a label string, scoped to the current ID stack.
+def get_id(ctx: Context, label: str) -> i64
+    h: i64 = HASH_INITIAL
+    if len(ctx.id_stack) > 0
+        h = ctx.id_stack[len(ctx.id_stack) - 1]
+    end
+    h = hash_str(h, label)
+    ctx.last_id = h
+    return h
+end
+
+# Push a new ID scope. All subsequent get_id() calls will be scoped to this label.
+def push_id(ctx: Context, label: str)
+    append(ctx.id_stack, get_id(ctx, label))
+end
+
+# Pop the current ID scope.
+def pop_id(ctx: Context)
+    pop(ctx.id_stack)
+end
+
+# Set keyboard focus to the given widget id.
+def set_focus(ctx: Context, id: i64)
+    ctx.focus = id
+    ctx.updated_focus = True
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Input
+# ═══════════════════════════════════════════════════════════════════════
+
+# Report mouse position. Call once per frame.
+def input_mousemove(ctx: Context, x: i64, y: i64)
+    ctx.mouse_x = x
+    ctx.mouse_y = y
+end
+
+# Report a mouse button press. btn is a MouseBtn flag.
+def input_mousedown(ctx: Context, x: i64, y: i64, btn: i64)
+    input_mousemove(ctx, x, y)
+    ctx.mouse_down = ctx.mouse_down | btn
+    ctx.mouse_pressed = ctx.mouse_pressed | btn
+end
+
+# Report a mouse button release. btn is a MouseBtn flag.
+def input_mouseup(ctx: Context, x: i64, y: i64, btn: i64)
+    input_mousemove(ctx, x, y)
+    ctx.mouse_down = ctx.mouse_down & ~btn
+end
+
+# Report scroll wheel movement. Positive y scrolls down.
+def input_scroll(ctx: Context, x: i64, y: i64)
+    ctx.scroll_delta_x += x
+    ctx.scroll_delta_y += y
+end
+
+# Report a key press. key is a Key flag.
+def input_keydown(ctx: Context, key: i64)
+    ctx.key_pressed = ctx.key_pressed | key
+    ctx.key_down = ctx.key_down | key
+end
+
+# Report a key release. key is a Key flag.
+def input_keyup(ctx: Context, key: i64)
+    ctx.key_down = ctx.key_down & ~key
+end
+
+# Report text input (typed characters). Appended to the input buffer.
+def input_text(ctx: Context, text: str)
+    ctx.input_text = ctx.input_text + text
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Drag & Drop
+# ═══════════════════════════════════════════════════════════════════════
+
+# Returns True if a drag operation is currently active.
+def is_dragging(ctx: Context) -> bool
+    return ctx.drag_active
+end
+
+# Get the data string of the item currently being dragged.
+def get_drag_data(ctx: Context) -> str
+    return ctx.drag_data
+end
+
+# Get the data string of the last completed drop source.
+def get_drop_source(ctx: Context) -> str
+    return ctx.last_drop_source
+end
+
+# Get the drop position of the last completed drop (DROP_BEFORE, DROP_INTO, DROP_AFTER).
+def get_drop_position(ctx: Context) -> i64
+    return ctx.last_drop_position
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Clip Stack
+# ═══════════════════════════════════════════════════════════════════════
+
+def push_clip_raw(ctx: Context, x: i64, y: i64, w: i64, h: i64)
+    append(ctx.clip_stack_x, x)
+    append(ctx.clip_stack_y, y)
+    append(ctx.clip_stack_w, w)
+    append(ctx.clip_stack_h, h)
+end
+
+def push_clip_rect(ctx: Context, r: Rect)
+    last := get_clip_rect(ctx)
+    clipped := intersect_rects(last, r)
+    push_clip_raw(ctx, clipped.x, clipped.y, clipped.w, clipped.h)
+end
+
+def pop_clip_rect(ctx: Context)
+    pop(ctx.clip_stack_x)
+    pop(ctx.clip_stack_y)
+    pop(ctx.clip_stack_w)
+    pop(ctx.clip_stack_h)
+end
+
+def get_clip_rect(ctx: Context) -> Rect
+    idx := len(ctx.clip_stack_x) - 1
+    return Rect(ctx.clip_stack_x[idx], ctx.clip_stack_y[idx],
+                ctx.clip_stack_w[idx], ctx.clip_stack_h[idx])
+end
+
+def check_clip(ctx: Context, r: Rect) -> i64
+    cr := get_clip_rect(ctx)
+    if r.x > cr.x + cr.w or r.x + r.w < cr.x or r.y > cr.y + cr.h or r.y + r.h < cr.y
+        return CLIP_ALL
+    end
+    if r.x >= cr.x and r.x + r.w <= cr.x + cr.w and r.y >= cr.y and r.y + r.h <= cr.y + cr.h
+        return CLIP_NONE
+    end
+    return CLIP_PART
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Command Buffer
+# ═══════════════════════════════════════════════════════════════════════
+
+def push_cmd(ctx: Context, cmd: DrawCmd)
+    if ctx.current_root != None
+        append(ctx.current_root.cmds, cmd)
+    end
+end
+
+def set_clip_cmd(ctx: Context, r: Rect)
+    cmd := DrawCmd(CmdKind.CLIP)
+    cmd.clip_x = r.x
+    cmd.clip_y = r.y
+    cmd.clip_w = r.w
+    cmd.clip_h = r.h
+    push_cmd(ctx, cmd)
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Drawing Primitives
+# ═══════════════════════════════════════════════════════════════════════
+
+# Draw a filled rectangle with RGBA color.
+def draw_rect(ctx: Context, r: Rect, cr: i64, cg: i64, cb: i64, ca: i64)
+    clipped := check_clip(ctx, r)
+    if clipped == CLIP_ALL
+        return
+    end
+    if clipped == CLIP_PART
+        set_clip_cmd(ctx, get_clip_rect(ctx))
+    end
+    cmd := DrawCmd(CmdKind.RECT)
+    cmd.rect_x = r.x
+    cmd.rect_y = r.y
+    cmd.rect_w = r.w
+    cmd.rect_h = r.h
+    cmd.color_r = cr
+    cmd.color_g = cg
+    cmd.color_b = cb
+    cmd.color_a = ca
+    push_cmd(ctx, cmd)
+    if clipped == CLIP_PART
+        set_clip_cmd(ctx, Rect(0, 0, UNCLIPPED, UNCLIPPED))
+    end
+end
+
+# Draw a 1px outline rectangle with RGBA color.
+def draw_box(ctx: Context, r: Rect, cr: i64, cg: i64, cb: i64, ca: i64)
+    draw_rect(ctx, Rect(r.x + 1, r.y, r.w - 2, 1), cr, cg, cb, ca)
+    draw_rect(ctx, Rect(r.x + 1, r.y + r.h - 1, r.w - 2, 1), cr, cg, cb, ca)
+    draw_rect(ctx, Rect(r.x, r.y, 1, r.h), cr, cg, cb, ca)
+    draw_rect(ctx, Rect(r.x + r.w - 1, r.y, 1, r.h), cr, cg, cb, ca)
+end
+
+def draw_text_raw(ctx: Context, text: str, px: i64, py: i64,
+                  cr: i64, cg: i64, cb: i64, ca: i64)
+    tw := ctx.text_measure.text_width(text)
+    th := ctx.text_measure.text_height()
+    r := Rect(px, py, tw, th)
+    clipped := check_clip(ctx, r)
+    if clipped == CLIP_ALL
+        return
+    end
+    if clipped == CLIP_PART
+        set_clip_cmd(ctx, get_clip_rect(ctx))
+    end
+    cmd := DrawCmd(CmdKind.TEXT)
+    cmd.text = text
+    cmd.text_x = px
+    cmd.text_y = py
+    cmd.color_r = cr
+    cmd.color_g = cg
+    cmd.color_b = cb
+    cmd.color_a = ca
+    push_cmd(ctx, cmd)
+    if clipped == CLIP_PART
+        set_clip_cmd(ctx, Rect(0, 0, UNCLIPPED, UNCLIPPED))
+    end
+end
+
+def draw_icon_raw(ctx: Context, icon: i64, r: Rect,
+                  cr: i64, cg: i64, cb: i64, ca: i64)
+    clipped := check_clip(ctx, r)
+    if clipped == CLIP_ALL
+        return
+    end
+    if clipped == CLIP_PART
+        set_clip_cmd(ctx, get_clip_rect(ctx))
+    end
+    cmd := DrawCmd(CmdKind.ICON)
+    cmd.icon_id = icon
+    cmd.rect_x = r.x
+    cmd.rect_y = r.y
+    cmd.rect_w = r.w
+    cmd.rect_h = r.h
+    cmd.color_r = cr
+    cmd.color_g = cg
+    cmd.color_b = cb
+    cmd.color_a = ca
+    push_cmd(ctx, cmd)
+    if clipped == CLIP_PART
+        set_clip_cmd(ctx, Rect(0, 0, UNCLIPPED, UNCLIPPED))
+    end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Layout
+# ═══════════════════════════════════════════════════════════════════════
+
+def push_layout(ctx: Context, bx: i64, by: i64, bw: i64, bh: i64)
+    lay := Layout()
+    lay.body_x = bx
+    lay.body_y = by
+    lay.body_w = bw
+    lay.body_h = bh
+    append(ctx.layout_stack, lay)
+    layout_row(ctx, 1, List[i64]() {0}, 0)
+end
+
+def get_layout(ctx: Context) -> Layout
+    return ctx.layout_stack[len(ctx.layout_stack) - 1]
+end
+
+# Configure the current layout row.
+# items: number of columns. widths: list of column widths (use -1 for fill).
+# height: row height in pixels.
+def layout_row(ctx: Context, items: i64, widths: List[i64], height: i64)
+    lay := get_layout(ctx)
+    lay.widths = widths
+    lay.items = items
+    lay.pos_x = lay.indent
+    lay.pos_y = lay.next_row
+    lay.size_y = height
+    lay.item_index = 0
+end
+
+# Override the width of the next layout item.
+def layout_width(ctx: Context, width: i64)
+    get_layout(ctx).size_x = width
+end
+
+# Override the height of the next layout item.
+def layout_height(ctx: Context, height: i64)
+    get_layout(ctx).size_y = height
+end
+
+# Begin a layout column. Widgets placed after this call stack vertically.
+def layout_begin_column(ctx: Context)
+    r := layout_next(ctx)
+    push_layout(ctx, r.x, r.y, r.w, r.h)
+end
+
+# End a layout column started by layout_begin_column().
+def layout_end_column(ctx: Context)
+    b := get_layout(ctx)
+    pop(ctx.layout_stack)
+    a := get_layout(ctx)
+    a.pos_x = max_i(a.pos_x, b.pos_x + b.body_x - a.body_x)
+    a.next_row = max_i(a.next_row, b.next_row + b.body_y - a.body_y)
+    a.max_x = max_i(a.max_x, b.max_x)
+    a.max_y = max_i(a.max_y, b.max_y)
+end
+
+# Set an explicit rect for the next widget. If relative is True, the rect
+# is offset from the current layout position.
+def layout_set_next(ctx: Context, r: Rect, relative: bool)
+    lay := get_layout(ctx)
+    lay.next_x = r.x
+    lay.next_y = r.y
+    lay.next_w = r.w
+    lay.next_h = r.h
+    if relative
+        lay.next_type = LAYOUT_RELATIVE
+    else
+        lay.next_type = LAYOUT_ABSOLUTE
+    end
+end
+
+# Consume and return the next layout rect for a widget.
+def layout_next(ctx: Context) -> Rect
+    lay := get_layout(ctx)
+    style := ctx.style
+    rx: i64 = 0
+    ry: i64 = 0
+    rw: i64 = 0
+    rh: i64 = 0
+
+    if lay.next_type != 0
+        tp := lay.next_type
+        lay.next_type = 0
+        rx = lay.next_x
+        ry = lay.next_y
+        rw = lay.next_w
+        rh = lay.next_h
+        if tp == LAYOUT_ABSOLUTE
+            ctx.last_rect_x = rx
+            ctx.last_rect_y = ry
+            ctx.last_rect_w = rw
+            ctx.last_rect_h = rh
+            return Rect(rx, ry, rw, rh)
+        end
+    else
+        if lay.item_index == lay.items
+            layout_row(ctx, lay.items, lay.widths, lay.size_y)
+        end
+        rx = lay.pos_x
+        ry = lay.pos_y
+        if len(lay.widths) > 0 and lay.item_index < len(lay.widths)
+            rw = lay.widths[lay.item_index]
+        else
+            rw = lay.size_x
+        end
+        rh = lay.size_y
+        if rw == 0
+            rw = style.size_x + style.padding * 2
+        end
+        if rh == 0
+            rh = style.size_y + style.padding * 2
+        end
+        if rw < 0
+            rw = rw + lay.body_w - rx + 1
+        end
+        if rh < 0
+            rh = rh + lay.body_h - ry + 1
+        end
+        lay.item_index += 1
+    end
+
+    lay.pos_x += rw + style.spacing
+    lay.next_row = max_i(lay.next_row, ry + rh + style.spacing)
+
+    rx = rx + lay.body_x
+    ry = ry + lay.body_y
+
+    lay.max_x = max_i(lay.max_x, rx + rw)
+    lay.max_y = max_i(lay.max_y, ry + rh)
+
+    ctx.last_rect_x = rx
+    ctx.last_rect_y = ry
+    ctx.last_rect_w = rw
+    ctx.last_rect_h = rh
+    return Rect(rx, ry, rw, rh)
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Container Management
+# ═══════════════════════════════════════════════════════════════════════
+
+# Look up or create a container by id. Pass Opt.CLOSED to return
+# None instead of creating a new container if it doesn't exist.
+def get_container(ctx: Context, id: i64, opt: i64) -> Container
+    if has(ctx.containers, id)
+        cnt := ctx.containers[id]
+        if cnt.open or ~opt & Opt.CLOSED
+            return cnt
+        end
+        return cnt
+    end
+    if opt & Opt.CLOSED
+        return None
+    end
+    cnt := Container()
+    cnt.open = True
+    ctx.containers[id] = cnt
+    bring_to_front(ctx, cnt)
+    return cnt
+end
+
+# Look up or create a container by name (hashed to an id).
+def get_container_by_name(ctx: Context, name: str) -> Container
+    id := get_id(ctx, name)
+    return get_container(ctx, id, 0)
+end
+
+# Return the currently active container (top of the container stack).
+def get_current_container(ctx: Context) -> Container
+    return ctx.container_stack[len(ctx.container_stack) - 1]
+end
+
+def pop_container(ctx: Context)
+    cnt := get_current_container(ctx)
+    lay := get_layout(ctx)
+    cnt.content_w = lay.max_x - lay.body_x
+    cnt.content_h = lay.max_y - lay.body_y
+    pop(ctx.container_stack)
+    pop(ctx.layout_stack)
+    pop_id(ctx)
+end
+
+def bring_to_front(ctx: Context, cnt: Container)
+    ctx.last_zindex += 1
+    cnt.zindex = ctx.last_zindex
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Root Container Management
+# ═══════════════════════════════════════════════════════════════════════
+
+def begin_root_container(ctx: Context, cnt: Container)
+    append(ctx.container_stack, cnt)
+    append(ctx.root_list, cnt)
+    append(ctx.root_container_stack, cnt)
+    ctx.current_root = cnt
+    cnt.is_root = True
+    # Clear commands for new frame
+    while len(cnt.cmds) > 0
+        pop(cnt.cmds)
+    end
+    # Check if mouse is over this container for hover tracking
+    if rect_overlaps_point(cnt.rect_x, cnt.rect_y, cnt.rect_w, cnt.rect_h,
+                           ctx.mouse_x, ctx.mouse_y)
+        if ctx.next_hover_root == None
+            ctx.next_hover_root = cnt
+        elif cnt.zindex >= ctx.next_hover_root.zindex
+            ctx.next_hover_root = cnt
+        end
+    end
+    # Push unclipped rect
+    push_clip_raw(ctx, 0, 0, UNCLIPPED, UNCLIPPED)
+end
+
+def end_root_container(ctx: Context)
+    pop_clip_rect(ctx)
+    pop_container(ctx)
+    pop(ctx.root_container_stack)
+    if len(ctx.root_container_stack) > 0
+        ctx.current_root = ctx.root_container_stack[len(ctx.root_container_stack) - 1]
+    else
+        ctx.current_root = None
+    end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Control Helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+def in_hover_root(ctx: Context) -> bool
+    i := len(ctx.container_stack) - 1
+    while i >= 0
+        if ctx.container_stack[i] == ctx.hover_root
+            return True
+        end
+        if ctx.container_stack[i].is_root
+            break
+        end
+        i -= 1
+    end
+    return False
+end
+
+def mouse_over(ctx: Context, r: Rect) -> bool
+    cr := get_clip_rect(ctx)
+    return rect_overlaps_point(r.x, r.y, r.w, r.h, ctx.mouse_x, ctx.mouse_y) and rect_overlaps_point(cr.x, cr.y, cr.w, cr.h, ctx.mouse_x, ctx.mouse_y) and in_hover_root(ctx)
+end
+
+def update_control(ctx: Context, id: i64, r: Rect, opt: i64)
+    mouseover := mouse_over(ctx, r)
+    if ctx.focus == id
+        ctx.updated_focus = True
+    end
+    if opt & Opt.NO_INTERACT
+        return
+    end
+    if mouseover and ctx.mouse_down == 0
+        ctx.hover = id
+    end
+    if ctx.focus == id
+        if ctx.mouse_pressed != 0 and not mouseover
+            set_focus(ctx, 0)
+        end
+        if ctx.mouse_down == 0 and ~opt & Opt.HOLD_FOCUS
+            set_focus(ctx, 0)
+        end
+    end
+    if ctx.hover == id
+        if ctx.mouse_pressed != 0
+            set_focus(ctx, id)
+        elif not mouseover
+            ctx.hover = 0
+        end
+    end
+end
+
+def draw_frame(ctx: Context, r: Rect, colorid: i64)
+    draw_rect(ctx, r, style_color_r(ctx, colorid), style_color_g(ctx, colorid),
+              style_color_b(ctx, colorid), style_color_a(ctx, colorid))
+    if colorid == ColorId.SCROLL_BASE or colorid == ColorId.SCROLL_THUMB or colorid == ColorId.TITLE_BG
+        return
+    end
+    if style_color_a(ctx, ColorId.BORDER) > 0
+        draw_box(ctx, expand_rect(r, 1),
+                 style_color_r(ctx, ColorId.BORDER), style_color_g(ctx, ColorId.BORDER),
+                 style_color_b(ctx, ColorId.BORDER), style_color_a(ctx, ColorId.BORDER))
+    end
+end
+
+def draw_control_frame(ctx: Context, id: i64, r: Rect, colorid: i64, opt: i64)
+    if opt & Opt.NO_FRAME
+        return
+    end
+    cid := colorid
+    if ctx.focus == id
+        cid = colorid + 2
+    elif ctx.hover == id
+        cid = colorid + 1
+    end
+    draw_frame(ctx, r, cid)
+end
+
+def draw_control_text(ctx: Context, text: str, r: Rect, colorid: i64, opt: i64)
+    tw := ctx.text_measure.text_width(text)
+    th := ctx.text_measure.text_height()
+    push_clip_rect(ctx, r)
+    py := r.y + (r.h - th) / 2
+    px: i64 = 0
+    if opt & Opt.ALIGN_CENTER
+        px = r.x + (r.w - tw) / 2
+    elif opt & Opt.ALIGN_RIGHT
+        px = r.x + r.w - tw - ctx.style.padding
+    else
+        px = r.x + ctx.style.padding
+    end
+    draw_text_raw(ctx, text, px, py,
+                  style_color_r(ctx, colorid), style_color_g(ctx, colorid),
+                  style_color_b(ctx, colorid), style_color_a(ctx, colorid))
+    pop_clip_rect(ctx)
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Frame Lifecycle
+# ═══════════════════════════════════════════════════════════════════════
+
+def sort_by_zindex(roots: List[Container])
+    n := len(roots)
+    i: i64 = 0
+    while i < n
+        j: i64 = 0
+        while j < n - 1 - i
+            if roots[j].zindex > roots[j + 1].zindex
+                tmp: Container = roots[j]
+                roots[j] = roots[j + 1]
+                roots[j + 1] = tmp
+            end
+            j += 1
+        end
+        i += 1
+    end
+end
+
+# Begin a new frame. Call once at the start of each UI frame,
+# after feeding input events.
+def begin_frame(ctx: Context)
+    ctx.root_list = List[Container]()
+    ctx.scroll_target = None
+    ctx.hover_root = ctx.next_hover_root
+    ctx.next_hover_root = None
+    ctx.mouse_delta_x = ctx.mouse_x - ctx.last_mouse_x
+    ctx.mouse_delta_y = ctx.mouse_y - ctx.last_mouse_y
+    ctx.frame += 1
+    ctx.last_drop_source = ""
+    ctx.last_drop_position = 0
+
+    # Bring hover root to front on click (must happen at start so
+    # in_hover_root returns true for controls in the clicked window)
+    if ctx.mouse_pressed != 0 and ctx.hover_root != None
+        if ctx.hover_root.zindex < ctx.last_zindex
+            bring_to_front(ctx, ctx.hover_root)
+        end
+    end
+end
+
+# End the current frame. Finalizes z-sorted draw commands into ctx.cmds,
+# draws the drag overlay, and resets per-frame input state.
+def end_frame(ctx: Context)
+    # If focus was not updated this frame, clear it
+    if not ctx.updated_focus
+        ctx.focus = 0
+    end
+    ctx.updated_focus = False
+
+    # Apply scroll to scroll target
+    if ctx.scroll_target != None
+        ctx.scroll_target.scroll_x += ctx.scroll_delta_x
+        ctx.scroll_target.scroll_y += ctx.scroll_delta_y
+    end
+
+    # Handle drag end
+    if ctx.drag_active and ctx.mouse_down == 0
+        ctx.drag_active = False
+        ctx.drag_id = 0
+        ctx.drag_data = ""
+        ctx.drag_label = ""
+        ctx.drop_id = 0
+        ctx.drop_position = 0
+    elif ctx.drag_id != 0 and not ctx.drag_active and ctx.mouse_down == 0
+        ctx.drag_id = 0
+        ctx.drag_data = ""
+        ctx.drag_label = ""
+    end
+
+    # Sort root containers by zindex
+    sort_by_zindex(ctx.root_list)
+
+    # Build final command list from sorted roots
+    ctx.cmds = List[DrawCmd]()
+    for i:i64 in range(len(ctx.root_list))
+        root := ctx.root_list[i]
+        for j:i64 in range(len(root.cmds))
+            append(ctx.cmds, root.cmds[j])
+        end
+    end
+
+    # Draw drag overlay on top of everything
+    if ctx.drag_active
+        label := ctx.drag_label
+        if label == ""
+            label = ctx.drag_data
+        end
+        tw := ctx.text_measure.text_width(label)
+        th := ctx.text_measure.text_height()
+        ox := ctx.mouse_x + 14
+        oy := ctx.mouse_y - 6
+        pw := tw + 16
+        ph := th + 8
+        dbg_r := style_color_r(ctx, ColorId.DRAG_BG)
+        dbg_g := style_color_g(ctx, ColorId.DRAG_BG)
+        dbg_b := style_color_b(ctx, ColorId.DRAG_BG)
+        dbg_a := style_color_a(ctx, ColorId.DRAG_BG)
+        dbr_r := style_color_r(ctx, ColorId.DRAG_BORDER)
+        dbr_g := style_color_g(ctx, ColorId.DRAG_BORDER)
+        dbr_b := style_color_b(ctx, ColorId.DRAG_BORDER)
+        dbr_a := style_color_a(ctx, ColorId.DRAG_BORDER)
+        # Background
+        bg := DrawCmd(CmdKind.RECT)
+        bg.rect_x = ox
+        bg.rect_y = oy
+        bg.rect_w = pw
+        bg.rect_h = ph
+        bg.color_r = dbg_r
+        bg.color_g = dbg_g
+        bg.color_b = dbg_b
+        bg.color_a = dbg_a
+        append(ctx.cmds, bg)
+        # Border (top, bottom, left, right)
+        bdr_t := DrawCmd(CmdKind.RECT)
+        bdr_t.rect_x = ox
+        bdr_t.rect_y = oy
+        bdr_t.rect_w = pw
+        bdr_t.rect_h = 1
+        bdr_t.color_r = dbr_r
+        bdr_t.color_g = dbr_g
+        bdr_t.color_b = dbr_b
+        bdr_t.color_a = dbr_a
+        append(ctx.cmds, bdr_t)
+        bdr_b := DrawCmd(CmdKind.RECT)
+        bdr_b.rect_x = ox
+        bdr_b.rect_y = oy + ph - 1
+        bdr_b.rect_w = pw
+        bdr_b.rect_h = 1
+        bdr_b.color_r = dbr_r
+        bdr_b.color_g = dbr_g
+        bdr_b.color_b = dbr_b
+        bdr_b.color_a = dbr_a
+        append(ctx.cmds, bdr_b)
+        bdr_l := DrawCmd(CmdKind.RECT)
+        bdr_l.rect_x = ox
+        bdr_l.rect_y = oy
+        bdr_l.rect_w = 1
+        bdr_l.rect_h = ph
+        bdr_l.color_r = dbr_r
+        bdr_l.color_g = dbr_g
+        bdr_l.color_b = dbr_b
+        bdr_l.color_a = dbr_a
+        append(ctx.cmds, bdr_l)
+        bdr_rv := DrawCmd(CmdKind.RECT)
+        bdr_rv.rect_x = ox + pw - 1
+        bdr_rv.rect_y = oy
+        bdr_rv.rect_w = 1
+        bdr_rv.rect_h = ph
+        bdr_rv.color_r = dbr_r
+        bdr_rv.color_g = dbr_g
+        bdr_rv.color_b = dbr_b
+        bdr_rv.color_a = dbr_a
+        append(ctx.cmds, bdr_rv)
+        # Text label
+        txt := DrawCmd(CmdKind.TEXT)
+        txt.text = label
+        txt.text_x = ox + 8
+        txt.text_y = oy + 4
+        txt.color_r = style_color_r(ctx, ColorId.DRAG_TEXT)
+        txt.color_g = style_color_g(ctx, ColorId.DRAG_TEXT)
+        txt.color_b = style_color_b(ctx, ColorId.DRAG_TEXT)
+        txt.color_a = style_color_a(ctx, ColorId.DRAG_TEXT)
+        append(ctx.cmds, txt)
+    end
+
+    # Reset per-frame input state
+    ctx.mouse_pressed = 0
+    ctx.key_pressed = 0
+    ctx.input_text = ""
+    ctx.scroll_delta_x = 0
+    ctx.scroll_delta_y = 0
+    ctx.last_mouse_x = ctx.mouse_x
+    ctx.last_mouse_y = ctx.mouse_y
+end

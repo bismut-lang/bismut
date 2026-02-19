@@ -1,13 +1,23 @@
 # string — string operations and type conversions
 
 [functions]
+# Concatenate two strings and return the result
 concat(a: str, b: str) -> str                  = __clib__string_concat
+# Return a substring starting at 'start' with the given length
 substr(s: str, start: i64, length: i64) -> str = __clib__string_substr
+# Find the first occurrence of 'sub' in 's', returns index or -1 if not found
 find(s: str, sub: str) -> i64                  = __clib__string_find
+# Return a single-character string from an ASCII code
 chr(code: i64) -> str                          = __clib__string_chr
+# Return the ASCII code of the character at index 'idx'
 char_at(s: str, idx: i64) -> i64               = __clib__string_char_at
+# Convert an integer to its string representation
 i64_to_str(n: i64) -> str                      = __clib__string_i64_to_str
+# Convert a float to its string representation
 f64_to_str(n: f64) -> str                      = __clib__string_f64_to_str
+# Convert a bool to "True" or "False"
 bool_to_str(b: bool) -> str                    = __clib__string_bool_to_str
+# Parse a string to an integer (supports decimal, hex 0x, octal 0o)
 str_to_i64(s: str) -> i64                      = __clib__string_str_to_i64
+# Parse a string to a float
 str_to_f64(s: str) -> f64                      = __clib__string_str_to_f64

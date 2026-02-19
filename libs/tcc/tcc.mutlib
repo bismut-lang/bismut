@@ -1,18 +1,30 @@
-# tcc — embedded TCC compiler via libtcc
+# tcc — embedded TCC (Tiny C Compiler) via libtcc
+# Provides in-process C compilation without requiring an external gcc install.
 
 [types]
+# Opaque TCC compiler state — manages compilation context and options
 TccState = TCCState
 
 [functions]
+# Create a new TCC compiler state
 new() -> TccState                                   = __clib__tcc_new
+# Destructor — automatically called when refcount reaches zero
 destroy(state: TccState) [dtor]                     = __clib__tcc_destroy
+# Set the output type to executable (returns 0 on success)
 set_output_exe(state: TccState) -> i64              = __clib__tcc_set_output_exe
+# Set compiler options as a space-separated string (e.g. "-O2 -Wall")
 set_options(state: TccState, opts: str) -> void     = __clib__tcc_set_options
+# Add a directory to the include search path (returns 0 on success)
 add_include_path(state: TccState, path: str) -> i64 = __clib__tcc_add_include_path
+# Add a directory to the library search path (returns 0 on success)
 add_library_path(state: TccState, path: str) -> i64 = __clib__tcc_add_library_path
+# Link against a library by name, e.g. "m" for libm (returns 0 on success)
 add_library(state: TccState, name: str) -> i64      = __clib__tcc_add_library
+# Compile C source code from a string (returns 0 on success, -1 on error)
 compile_string(state: TccState, code: str) -> i64   = __clib__tcc_compile_string
+# Write the compiled output to a file (returns 0 on success)
 output_file(state: TccState, filename: str) -> i64  = __clib__tcc_output_file
+# Set the TCC library path for runtime files (crt1.o, libtcc1.a, etc.)
 set_lib_path(state: TccState, path: str) -> void    = __clib__tcc_set_lib_path
 
 [flags]

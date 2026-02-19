@@ -129,6 +129,46 @@ def _collect_diagnostics(result: AnalysisResult, s: sink.Sink)
 end
 
 # ─── Symbol extraction ───────────────────────────────────────────────
+
+def _is_mutlib(file: str) -> bool
+    # Check if a symbol originates from a .mutlib file
+    return su.ends_with(file, ".mutlib")
+end
+
+def _unmangle(name: str) -> str
+    # Convert compiler-internal "alias__name" to user-facing "alias.name"
+    pos := string.find(name, "__")
+    if pos >= 0
+        alias := string.substr(name, 0, pos)
+        rest := string.substr(name, pos + 2, len(name) - pos - 2)
+        return string.concat(string.concat(alias, "."), rest)
+    end
+    return name
+end
+
+def _unmangle_types(s: str) -> str
+    # Unmangle "__" to "." in type references within a signature string
+    sb := stringbuilder.new()
+    slen := len(s)
+    i: i64 = 0
+    while i < slen
+        c := s[i]
+        if su.is_alpha(c) or c == '_'
+            # Collect identifier
+            start := i
+            while i < slen and (su.is_alnum(s[i]) or s[i] == '_')
+                i += 1
+            end
+            ident := string.substr(s, start, i - start)
+            stringbuilder.append_str(sb, _unmangle(ident))
+        else
+            stringbuilder.append_str(sb, string.chr(c))
+            i += 1
+        end
+    end
+    return stringbuilder.build(sb)
+end
+
 def _sym(result: AnalysisResult, name: str, kind: str, n: pars.Node, parent: str, detail: str)
     append(result.symbols, SymbolInfo(name, kind, n.file, n.line, n.col, n.doc, detail, parent))
 end
@@ -165,46 +205,80 @@ def _collect_symbols(result: AnalysisResult, prog: pars.Node)
     while i < prog.child_count()
         child := prog.child(i)
         k := child.kind
+        is_ext := _is_mutlib(child.file)
+        is_imported := len(child.file) > 0 and child.file != result.file
         if k == mp.NodeKind.FUNC_DECL
             sig := _func_signature(child)
-            _sym(result, child.value, "function", child, "", sig)
-            _collect_params(result, child)
+            name := child.value
+            if is_imported
+                name = _unmangle(name)
+                sig = _unmangle_types(sig)
+            end
+            _sym(result, name, "function", child, "", sig)
+            if not is_ext and not is_imported
+                _collect_params(result, child)
+            end
         elif k == mp.NodeKind.CLASS_DECL
-            _sym(result, child.value, "class", child, "", "")
-            _collect_member_symbols(result, child)
+            name := child.value
+            if is_imported
+                name = _unmangle(name)
+            end
+            _sym(result, name, "class", child, "", "")
+            if not is_ext
+                _collect_member_symbols(result, child, name)
+            end
         elif k == mp.NodeKind.STRUCT_DECL
-            _sym(result, child.value, "struct", child, "", "")
-            _collect_member_symbols(result, child)
+            name := child.value
+            if is_imported
+                name = _unmangle(name)
+            end
+            _sym(result, name, "struct", child, "", "")
+            _collect_member_symbols(result, child, name)
         elif k == mp.NodeKind.INTERFACE_DECL
-            _sym(result, child.value, "interface", child, "", "")
-            _collect_interface_members(result, child)
+            name := child.value
+            if is_imported
+                name = _unmangle(name)
+            end
+            _sym(result, name, "interface", child, "", "")
+            _collect_interface_members(result, child, name)
         elif k == mp.NodeKind.ENUM_DECL
-            _sym(result, child.value, "enum", child, "", "")
-            _collect_enum_variants(result, child)
+            name := child.value
+            if is_imported
+                name = _unmangle(name)
+            end
+            _sym(result, name, "enum", child, "", "")
+            _collect_enum_variants(result, child, name)
         elif k == mp.NodeKind.VAR_DECL
-            _sym(result, child.value, "variable", child, "", child.ty)
+            name := child.value
+            if is_imported
+                name = _unmangle(name)
+            end
+            _sym(result, name, "variable", child, "", _unmangle_types(child.ty))
         elif k == mp.NodeKind.CONST_DECL
-            _sym(result, child.value, "constant", child, "", child.ty)
+            name := child.value
+            if is_imported
+                name = _unmangle(name)
+            end
+            _sym(result, name, "constant", child, "", _unmangle_types(child.ty))
         end
         i += 1
     end
 end
 
-def _collect_member_symbols(result: AnalysisResult, parent: pars.Node)
-    pname := parent.value
+def _collect_member_symbols(result: AnalysisResult, parent: pars.Node, pname: str)
     j: i64 = 0
     while j < parent.child_count()
         member := parent.child(j)
         if member.kind == mp.NodeKind.FUNC_DECL
             name := format("{}.{}", pname, member.value)
-            sig := _func_signature(member)
+            sig := _unmangle_types(_func_signature(member))
             _sym(result, name, "method", member, pname, sig)
             _collect_params(result, member)
         elif member.kind == mp.NodeKind.FIELD_DECL
             name := format("{}.{}", pname, member.value)
             ty_str := ""
             if member.child_count() > 0
-                ty_str = tu.type_node_to_str(member.child(0))
+                ty_str = _unmangle_types(tu.type_node_to_str(member.child(0)))
             end
             append(result.symbols, SymbolInfo(name, "field", member.file, member.line, member.col, ty_str, ty_str, pname))
         end
@@ -212,8 +286,7 @@ def _collect_member_symbols(result: AnalysisResult, parent: pars.Node)
     end
 end
 
-def _collect_interface_members(result: AnalysisResult, parent: pars.Node)
-    pname := parent.value
+def _collect_interface_members(result: AnalysisResult, parent: pars.Node, pname: str)
     j: i64 = 0
     while j < parent.child_count()
         member := parent.child(j)
@@ -225,8 +298,7 @@ def _collect_interface_members(result: AnalysisResult, parent: pars.Node)
     end
 end
 
-def _collect_enum_variants(result: AnalysisResult, parent: pars.Node)
-    pname := parent.value
+def _collect_enum_variants(result: AnalysisResult, parent: pars.Node, pname: str)
     j: i64 = 0
     while j < parent.child_count()
         member := parent.child(j)

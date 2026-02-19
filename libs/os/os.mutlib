@@ -1,8 +1,13 @@
 # os — process execution, time, and system access
 
 [functions]
+# Run a shell command and return its exit code
 exec(cmd: str) -> i64   = __clib__os_exec
+# Return the current high-resolution timestamp in seconds
 time_now() -> f64       = __clib__os_time_now
+# Terminate the process with the given exit code
 exit(code: i64) -> void = __clib__os_exit
+# Return the number of command-line arguments
 argc() -> i64           = __clib__os_argc
+# Return the command-line argument at the given index
 argv(index: i64) -> str = __clib__os_argv

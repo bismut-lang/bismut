@@ -359,15 +359,17 @@ end
 
 # ─── Synthetic AST node creation ─────────────────────────────────────
 
-def _make_synthetic_func(name: str, param_names: List[str], param_types: List[str], ret_type: str, c_name: str) -> pars.Node
-    n := pars.Node(mp.NodeKind.FUNC_DECL, name, 0, 0)
+def _make_synthetic_func(name: str, param_names: List[str], param_types: List[str], ret_type: str, c_name: str, doc: str, file: str, line: i64) -> pars.Node
+    n := pars.Node(mp.NodeKind.FUNC_DECL, name, line, 1)
+    n.doc = doc
+    n.file = file
 
     # Params block
-    params := pars.Node(mp.NodeKind.BLOCK, "params", 0, 0)
+    params := pars.Node(mp.NodeKind.BLOCK, "params", line, 1)
     i: i64 = 0
     while i < len(param_names)
-        p := pars.Node(mp.NodeKind.PARAM, param_names[i], 0, 0)
-        ty := pars.Node(mp.NodeKind.TYPE, param_types[i], 0, 0)
+        p := pars.Node(mp.NodeKind.PARAM, param_names[i], line, 1)
+        ty := pars.Node(mp.NodeKind.TYPE, param_types[i], line, 1)
         p.add_child(ty)
         params.add_child(p)
         i += 1
@@ -375,7 +377,7 @@ def _make_synthetic_func(name: str, param_names: List[str], param_types: List[st
     n.add_child(params)
 
     # Return type
-    rt := pars.Node(mp.NodeKind.TYPE, ret_type, 0, 0)
+    rt := pars.Node(mp.NodeKind.TYPE, ret_type, line, 1)
     n.add_child(rt)
 
     # Empty body
@@ -388,17 +390,22 @@ def _make_synthetic_func(name: str, param_names: List[str], param_types: List[st
     return n
 end
 
-def _make_synthetic_class(name: str) -> pars.Node
-    return pars.Node(mp.NodeKind.CLASS_DECL, name, 0, 0)
+def _make_synthetic_class(name: str, doc: str, file: str, line: i64) -> pars.Node
+    n := pars.Node(mp.NodeKind.CLASS_DECL, name, line, 1)
+    n.doc = doc
+    n.file = file
+    return n
 end
 
-def _make_synthetic_var(name: str, ty_name: str, is_const: bool) -> pars.Node
+def _make_synthetic_var(name: str, ty_name: str, is_const: bool, doc: str, file: str, line: i64) -> pars.Node
     kind: i64 = mp.NodeKind.VAR_DECL
     if is_const
         kind = mp.NodeKind.CONST_DECL
     end
-    n := pars.Node(kind, name, 0, 0)
-    ty := pars.Node(mp.NodeKind.TYPE, ty_name, 0, 0)
+    n := pars.Node(kind, name, line, 1)
+    n.doc = doc
+    n.file = file
+    ty := pars.Node(mp.NodeKind.TYPE, ty_name, line, 1)
     n.add_child(ty)
     # Dummy value — use the right literal kind for the type
     val_kind: i64 = mp.NodeKind.INT_LIT
@@ -479,7 +486,7 @@ def _resolve_externs(prog: pars.Node, src_file: str, compiler_dir: str, info: Ex
                 t := data.types[j]
                 mangled := string.concat(string.concat(alias, "__"), t.bismut_name)
                 if not has(existing, mangled)
-                    append(externs, _make_synthetic_class(mangled))
+                    append(externs, _make_synthetic_class(mangled, t.doc, manifest_path, t.line))
                     existing[mangled] = 1
                 end
                 c_dtor := t.c_dtor
@@ -512,7 +519,7 @@ def _resolve_externs(prog: pars.Node, src_file: str, compiler_dir: str, info: Ex
                 end
 
                 if not has(existing, fname)
-                    append(externs, _make_synthetic_func(fname, f.param_names, mangled_ptypes, ret, f.c_name))
+                    append(externs, _make_synthetic_func(fname, f.param_names, mangled_ptypes, ret, f.c_name, f.doc, manifest_path, f.line))
                     existing[fname] = 1
                 end
                 j += 1
@@ -524,7 +531,7 @@ def _resolve_externs(prog: pars.Node, src_file: str, compiler_dir: str, info: Ex
                 ec := data.consts[j]
                 mangled := string.concat(string.concat(alias, "__"), ec.bismut_name)
                 if not has(existing, mangled)
-                    append(externs, _make_synthetic_var(mangled, ec.ty, True))
+                    append(externs, _make_synthetic_var(mangled, ec.ty, True, ec.doc, manifest_path, ec.line))
                     existing[mangled] = 1
                 end
                 info.add_constant(mangled, ec.c_expr, ec.ty)

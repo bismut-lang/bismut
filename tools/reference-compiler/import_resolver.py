@@ -337,8 +337,8 @@ def _resolve_decls(funcs, classes, ifaces, aliases, structs=None):
 
 # --------------- Extern resolution ---------------
 
-def _make_dummy_loc():
-    return SrcLoc(file="<extern>", index=0, line=0, col=0, length=0)
+def _make_dummy_loc(file: str = "<extern>", line: int = 0):
+    return SrcLoc(file=file, index=0, line=line, col=1, length=0)
 
 
 def resolve_externs(prog: Program, src_file: str, compiler_dir: str, target_platform: str | None = None) -> Program:
@@ -361,15 +361,18 @@ def resolve_externs(prog: Program, src_file: str, compiler_dir: str, target_plat
 
         alias = ext.alias
         loc = _make_dummy_loc()
+        manifest_path = os.path.join(lib_dir, f"{ext.name}.mutlib")
 
         # Create synthetic ClassDecl for each extern type
         for et in manifest.types:
             mangled = f"{alias}__{et.bismut_name}"
+            eloc = _make_dummy_loc(file=manifest_path, line=et.line)
             cls = ClassDecl(
-                loc=loc,
+                loc=eloc,
                 name=mangled,
                 fields=[],
                 methods=[],
+                doc=et.doc,
             )
             if mangled not in existing_classes:
                 prog.classes.insert(0, cls)
@@ -382,16 +385,18 @@ def resolve_externs(prog: Program, src_file: str, compiler_dir: str, target_plat
 
         # Create synthetic FuncDecl for each extern function
         for ef in manifest.funcs:
-            params = [Param(loc=loc, name=pn, ty=TypeRef(loc=loc, name=pt))
+            eloc = _make_dummy_loc(file=manifest_path, line=ef.line)
+            params = [Param(loc=eloc, name=pn, ty=TypeRef(loc=eloc, name=pt))
                       for pn, pt in ef.params]
             ret_name = ef.ret_type
             fd = FuncDecl(
-                loc=loc,
+                loc=eloc,
                 name=f"{alias}__{ef.bismut_name}",
                 params=params,
-                ret=TypeRef(loc=loc, name=ret_name),
-                body=SBlock(loc=loc, stmts=[]),
+                ret=TypeRef(loc=eloc, name=ret_name),
+                body=SBlock(loc=eloc, stmts=[]),
                 extern_c_name=ef.c_name,
+                doc=ef.doc,
             )
             # Mangle type references within param/return that refer to lib's own types
             for p in fd.params:

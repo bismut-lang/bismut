@@ -1,72 +1,106 @@
+# buffer — binary byte buffer for reading and writing raw data
+
 [types]
+# Opaque byte buffer — supports sequential writes and positional reads
 Buffer = __clib__buffer_Buffer
 
 [functions]
-# Constructor
+
+# Create a new empty buffer
 new() -> Buffer            = __clib__buffer_new
+# Create a buffer pre-filled with the raw bytes of a string
 from_str(s: str) -> Buffer = __clib__buffer_from_str
 
-# Destructor
+# Destructor — automatically called when refcount reaches zero
 destroy(buf: Buffer) [dtor] = __clib__buffer_destroy
 
-# Write: single byte / raw bytes
+# Write a single byte (0–255) to the buffer
 write_byte(buf: Buffer, val: i64) -> void   = __clib__buffer_write_byte
+# Write raw bytes from a string to the buffer
 write_bytes(buf: Buffer, data: str) -> void = __clib__buffer_write_bytes
+# Write a zero-terminated string to the buffer
 write_str_zt(buf: Buffer, s: str) -> void   = __clib__buffer_write_str_zt
 
-# Write: integers — little endian
+# Write a signed 16-bit integer in little-endian byte order
 write_i16_le(buf: Buffer, val: i64) -> void = __clib__buffer_write_i16_le
+# Write a signed 32-bit integer in little-endian byte order
 write_i32_le(buf: Buffer, val: i64) -> void = __clib__buffer_write_i32_le
+# Write a signed 64-bit integer in little-endian byte order
 write_i64_le(buf: Buffer, val: i64) -> void = __clib__buffer_write_i64_le
 
-# Write: integers — big endian
+# Write a signed 16-bit integer in big-endian byte order
 write_i16_be(buf: Buffer, val: i64) -> void = __clib__buffer_write_i16_be
+# Write a signed 32-bit integer in big-endian byte order
 write_i32_be(buf: Buffer, val: i64) -> void = __clib__buffer_write_i32_be
+# Write a signed 64-bit integer in big-endian byte order
 write_i64_be(buf: Buffer, val: i64) -> void = __clib__buffer_write_i64_be
 
-# Write: floats
+# Write a 32-bit float in little-endian byte order
 write_f32_le(buf: Buffer, val: f64) -> void = __clib__buffer_write_f32_le
+# Write a 32-bit float in big-endian byte order
 write_f32_be(buf: Buffer, val: f64) -> void = __clib__buffer_write_f32_be
+# Write a 64-bit float in little-endian byte order
 write_f64_le(buf: Buffer, val: f64) -> void = __clib__buffer_write_f64_le
+# Write a 64-bit float in big-endian byte order
 write_f64_be(buf: Buffer, val: f64) -> void = __clib__buffer_write_f64_be
 
-# Read: single byte
+# Read one unsigned byte (0–255) and advance the read position
 read_u8(buf: Buffer) -> i64            = __clib__buffer_read_u8
+# Read one signed byte (-128–127) and advance the read position
 read_i8(buf: Buffer) -> i64            = __clib__buffer_read_i8
+# Read n raw bytes and return as a string
 read_bytes(buf: Buffer, n: i64) -> str = __clib__buffer_read_bytes
+# Read a zero-terminated string from the current read position
 read_str_zt(buf: Buffer) -> str = __clib__buffer_read_str_zt
 
-# Read: integers — little endian (unsigned)
+# Read an unsigned 16-bit integer in little-endian byte order
 read_u16_le(buf: Buffer) -> i64 = __clib__buffer_read_u16_le
+# Read an unsigned 32-bit integer in little-endian byte order
 read_u32_le(buf: Buffer) -> i64 = __clib__buffer_read_u32_le
 
-# Read: integers — little endian (signed)
+# Read a signed 16-bit integer in little-endian byte order
 read_i16_le(buf: Buffer) -> i64 = __clib__buffer_read_i16_le
+# Read a signed 32-bit integer in little-endian byte order
 read_i32_le(buf: Buffer) -> i64 = __clib__buffer_read_i32_le
+# Read a signed 64-bit integer in little-endian byte order
 read_i64_le(buf: Buffer) -> i64 = __clib__buffer_read_i64_le
 
-# Read: integers — big endian (unsigned)
+# Read an unsigned 16-bit integer in big-endian byte order
 read_u16_be(buf: Buffer) -> i64 = __clib__buffer_read_u16_be
+# Read an unsigned 32-bit integer in big-endian byte order
 read_u32_be(buf: Buffer) -> i64 = __clib__buffer_read_u32_be
 
-# Read: integers — big endian (signed)
+# Read a signed 16-bit integer in big-endian byte order
 read_i16_be(buf: Buffer) -> i64 = __clib__buffer_read_i16_be
+# Read a signed 32-bit integer in big-endian byte order
 read_i32_be(buf: Buffer) -> i64 = __clib__buffer_read_i32_be
+# Read a signed 64-bit integer in big-endian byte order
 read_i64_be(buf: Buffer) -> i64 = __clib__buffer_read_i64_be
 
-# Read: floats
+# Read a 32-bit float in little-endian byte order
 read_f32_le(buf: Buffer) -> f64 = __clib__buffer_read_f32_le
+# Read a 32-bit float in big-endian byte order
 read_f32_be(buf: Buffer) -> f64 = __clib__buffer_read_f32_be
+# Read a 64-bit float in little-endian byte order
 read_f64_le(buf: Buffer) -> f64 = __clib__buffer_read_f64_le
+# Read a 64-bit float in big-endian byte order
 read_f64_be(buf: Buffer) -> f64 = __clib__buffer_read_f64_be
 
-# Utility
+# Return the total number of bytes written to the buffer
 length(buf: Buffer) -> i64    = __clib__buffer_length
+# Return the current allocated capacity in bytes
 capacity(buf: Buffer) -> i64  = __clib__buffer_capacity
+# Return the current read position
 pos(buf: Buffer) -> i64       = __clib__buffer_pos
+# Return the number of bytes remaining to read
 remaining(buf: Buffer) -> i64 = __clib__buffer_remaining
+# Reset the read position to the beginning
 reset(buf: Buffer) -> void    = __clib__buffer_reset
+# Clear all data and reset both read and write positions
 clear(buf: Buffer) -> void    = __clib__buffer_clear
+# Return the buffer contents as a string
 to_str(buf: Buffer) -> str    = __clib__buffer_to_str
+# Set the read position to an absolute byte offset
 seek(buf: Buffer, pos: i64) -> void = __clib__buffer_seek
+# Extract a byte range as a string, starting at 'start' for 'n' bytes
 slice(buf: Buffer, start: i64, n: i64) -> str = __clib__buffer_slice

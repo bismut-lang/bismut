@@ -19,6 +19,8 @@ class MutlibFunc
     param_types: List[str]
     ret_type: str
     is_dtor: bool
+    doc: str
+    line: i64
 
     def init(self, bismut_name: str, c_name: str, ret_type: str, is_dtor: bool)
         self.bismut_name = bismut_name
@@ -27,6 +29,8 @@ class MutlibFunc
         self.param_types = List[str]()
         self.ret_type = ret_type
         self.is_dtor = is_dtor
+        self.doc = ""
+        self.line = 0
     end
 end
 
@@ -34,11 +38,15 @@ class MutlibType
     bismut_name: str
     c_type: str
     c_dtor: str
+    doc: str
+    line: i64
 
     def init(self, bismut_name: str, c_type: str)
         self.bismut_name = bismut_name
         self.c_type = c_type
         self.c_dtor = ""
+        self.doc = ""
+        self.line = 0
     end
 end
 
@@ -46,11 +54,15 @@ class MutlibConst
     bismut_name: str
     ty: str
     c_expr: str
+    doc: str
+    line: i64
 
     def init(self, bismut_name: str, ty: str, c_expr: str)
         self.bismut_name = bismut_name
         self.ty = ty
         self.c_expr = c_expr
+        self.doc = ""
+        self.line = 0
     end
 end
 
@@ -209,6 +221,31 @@ def _link_dtors(data: MutlibData)
     end
 end
 
+def _strip_comment(line: str) -> str
+    # Strip leading "# " or "#" from a comment line
+    if len(line) > 1 and line[1] == ' '
+        return string.substr(line, 2, len(line) - 2)
+    end
+    return string.substr(line, 1, len(line) - 1)
+end
+
+def _flush_doc(doc_lines: List[str]) -> str
+    # Join accumulated comment lines into a single doc string
+    if len(doc_lines) == 0
+        return ""
+    end
+    sb := stringbuilder.new()
+    j: i64 = 0
+    while j < len(doc_lines)
+        if j > 0
+            stringbuilder.append_str(sb, "\n")
+        end
+        stringbuilder.append_str(sb, doc_lines[j])
+        j += 1
+    end
+    return stringbuilder.build(sb)
+end
+
 # ─── Public API ──────────────────────────────────────────────────────
 
 def parse_mutlib(path: str, lib_name: str, lib_dir: str, target_plat: str) -> MutlibData
@@ -218,27 +255,51 @@ def parse_mutlib(path: str, lib_name: str, lib_dir: str, target_plat: str) -> Mu
     section := ""
     flag_keys: List[str] = List[str]()
     flag_vals: List[str] = List[str]()
+    doc_lines: List[str] = List[str]()
 
     i: i64 = 0
     while i < len(lines)
         line := su.trim(lines[i])
+        line_num := i + 1
         i += 1
 
-        if len(line) == 0 or line[0] == '#'
+        if len(line) == 0
+            # Blank line resets accumulated doc
+            doc_lines = List[str]()
+            continue
+        end
+
+        if line[0] == '#'
+            # Accumulate comment for next declaration
+            append(doc_lines, _strip_comment(line))
             continue
         end
 
         if line[0] == '[' and line[len(line) - 1] == ']'
             section = su.trim(string.substr(line, 1, len(line) - 2))
+            doc_lines = List[str]()
             continue
         end
 
+        # Consume accumulated doc
+        doc := _flush_doc(doc_lines)
+        doc_lines = List[str]()
+
         if section == "types"
-            append(data.types, _parse_type(line))
+            t := _parse_type(line)
+            t.doc = doc
+            t.line = line_num
+            append(data.types, t)
         elif section == "functions"
-            append(data.funcs, _parse_func(line))
+            f := _parse_func(line)
+            f.doc = doc
+            f.line = line_num
+            append(data.funcs, f)
         elif section == "constants"
-            append(data.consts, _parse_const(line))
+            c := _parse_const(line)
+            c.doc = doc
+            c.line = line_num
+            append(data.consts, c)
         elif section == "flags"
             eq := string.find(line, "=")
             if eq >= 0

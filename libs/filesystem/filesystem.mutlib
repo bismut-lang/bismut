@@ -1,8 +1,13 @@
 # filesystem — file system operations
 
 [functions]
+# Read the entire contents of a file and return as a string
 read(path: str) -> str          = __clib__filesystem_read
+# Write content to a file, creating or overwriting it
 write(path: str, content: str)  = __clib__filesystem_write
+# Append content to the end of a file
 append(path: str, content: str) = __clib__filesystem_append
+# Return True if the file at path exists
 exists(path: str) -> bool       = __clib__filesystem_exists
+# Return True if a directory exists at path
 dir_exists(path: str) -> bool   = __clib__filesystem_dir_exists

@@ -34,6 +34,8 @@ class ExternFunc:
     ret_type: str
     c_name: str
     is_dtor: bool = False  # True if tagged [dtor] — first param's type uses this as destructor
+    doc: str = ""           # doc comment from preceding # lines
+    line: int = 0           # 1-based line number in the .mutlib file
 
 
 @dataclass
@@ -41,6 +43,8 @@ class ExternConst:
     bismut_name: str
     ty: str
     c_expr: str  # C expression or literal
+    doc: str = ""           # doc comment from preceding # lines
+    line: int = 0           # 1-based line number in the .mutlib file
 
 
 @dataclass
@@ -48,6 +52,8 @@ class ExternType:
     bismut_name: str
     c_type: str           # C struct/typedef name (used as pointer: c_type*)
     c_dtor: Optional[str] = None  # C function called on the raw pointer when refcount drops to 0
+    doc: str = ""           # doc comment from preceding # lines
+    line: int = 0           # 1-based line number in the .mutlib file
 
 
 @dataclass
@@ -80,24 +86,53 @@ def parse_mutlib(path: str, lib_name: str, lib_dir: str, target_platform: str | 
     consts: List[ExternConst] = []
     flag_entries: dict = {}
     section = None
+    doc_lines: list[str] = []
+
+    def _strip_comment(line: str) -> str:
+        """Strip leading '# ' or '#' from a comment line."""
+        if len(line) > 1 and line[1] == ' ':
+            return line[2:]
+        return line[1:]
+
+    def _flush_doc() -> str:
+        """Join accumulated doc lines into a single string and clear."""
+        nonlocal doc_lines
+        if not doc_lines:
+            return ""
+        result = "\n".join(doc_lines)
+        doc_lines = []
+        return result
 
     with open(path, encoding="utf-8") as f:
         for line_no, raw in enumerate(f, 1):
             line = raw.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                doc_lines = []
+                continue
+            if line.startswith("#"):
+                doc_lines.append(_strip_comment(line))
                 continue
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip().lower()
+                doc_lines = []
                 continue
+
+            doc = _flush_doc()
 
             if section == "types":
                 t = _parse_type_line(line, path, line_no)
+                t.doc = doc
+                t.line = line_no
                 types.append(t)
             elif section == "functions":
                 fn = _parse_func_line(line, path, line_no)
+                fn.doc = doc
+                fn.line = line_no
                 funcs.append(fn)
             elif section == "constants":
                 c = _parse_const_line(line, path, line_no)
+                c.doc = doc
+                c.line = line_no
                 consts.append(c)
             elif section == "flags":
                 if "=" in line:
